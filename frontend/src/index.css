@@ -2,14 +2,233 @@
 @tailwind components;
 @tailwind utilities;
 
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+:root {
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+  --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
+  --ink: #19154E;
+  --cream: #FFF8FC;
+  --sand: #F5EEFF;
+  --fae-pink: #FF7EB6;
+  --fae-lilac: #B799E8;
+  --fae-blush: #FFE4F1;
 }
-::-webkit-scrollbar-track {
-  background: #0f172a;
+
+body {
+  font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+  background-color: var(--cream);
+  color: var(--ink);
 }
-::-webkit-scrollbar-thumb {
-  background: #334155;
-  border-radius: 3px;
+
+.font-display {
+  font-family: 'Space Grotesk', sans-serif;
+  letter-spacing: -0.03em;
+}
+
+.font-mono-code {
+  font-family: 'JetBrains Mono', monospace;
+}
+
+/* Clay.global + Upqode Tactile Editorial Bento Cards in Fae's Palette */
+.editorial-card {
+  background: #FFFFFF;
+  border: 2px solid #19154E;
+  box-shadow: 5px 5px 0px #19154E;
+  border-radius: 24px;
+  transition-property: transform, opacity, background-color, border-color;
+  transition-duration: 180ms;
+  transition-timing-function: var(--ease-out);
+}
+
+.editorial-card-sm {
+  background: #FFFFFF;
+  border: 2px solid #19154E;
+  box-shadow: 3px 3px 0px #19154E;
+  border-radius: 18px;
+  transition-property: transform, opacity, background-color, border-color;
+  transition-duration: 160ms;
+  transition-timing-function: var(--ease-out);
+}
+
+.editorial-btn {
+  border: 2px solid #19154E;
+  box-shadow: 3px 3px 0px #19154E;
+  transition-property: transform, opacity, background-color, color;
+  transition-duration: 140ms;
+  transition-timing-function: var(--ease-out);
+}
+
+.editorial-btn:active {
+  transform: translate(2px, 2px);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .editorial-card-interactive:hover {
+    transform: translate(-2px, -2px);
+  }
+  .editorial-btn:hover {
+    transform: translate(-1.5px, -1.5px);
+  }
+  .editorial-btn:active {
+    transform: translate(2px, 2px);
+  }
+}
+
+/* ==========================================================================
+   Cartoony Animated Characters (Compositor-Only: transform & opacity)
+   ========================================================================== */
+
+@keyframes char-float {
+  0%, 100% {
+    transform: translateY(0px) rotate(0deg);
+  }
+  50% {
+    transform: translateY(-6px) rotate(1.2deg);
+  }
+}
+
+@keyframes char-bob-head {
+  0%, 100% {
+    transform: translateY(0px) rotate(-2deg);
+  }
+  50% {
+    transform: translateY(-3px) rotate(3deg);
+  }
+}
+
+@keyframes char-wave-arm {
+  0%, 100% {
+    transform: rotate(0deg);
+  }
+  50% {
+    transform: rotate(-16deg);
+  }
+}
+
+@keyframes char-wand-burst {
+  0%, 100% {
+    transform: rotate(0deg) scale(1);
+  }
+  35% {
+    transform: rotate(-14deg) scale(1.06);
+  }
+  70% {
+    transform: rotate(8deg) scale(1);
+  }
+}
+
+@keyframes char-blink {
+  0%, 44%, 48%, 94%, 98%, 100% {
+    transform: scaleY(1);
+  }
+  46%, 96% {
+    transform: scaleY(0.1);
+  }
+}
+
+@keyframes char-plane-fly {
+  0% {
+    transform: translate(0px, 0px) rotate(-6deg) scale(0.95);
+    opacity: 0;
+  }
+  15% {
+    opacity: 1;
+  }
+  85% {
+    opacity: 1;
+  }
+  100% {
+    transform: translate(42px, -22px) rotate(12deg) scale(1.04);
+    opacity: 0;
+  }
+}
+
+@keyframes char-telescope-scan {
+  0%, 100% {
+    transform: rotate(-5deg);
+  }
+  50% {
+    transform: rotate(7deg);
+  }
+}
+
+@keyframes star-pulse {
+  0%, 100% {
+    transform: scale(1) rotate(0deg);
+    opacity: 0.9;
+  }
+  50% {
+    transform: scale(1.18) rotate(15deg);
+    opacity: 1;
+  }
+}
+
+.anim-char-float {
+  animation: char-float 3.6s var(--ease-in-out) infinite;
+  transform-origin: center bottom;
+}
+
+.anim-char-head {
+  animation: char-bob-head 2.8s var(--ease-in-out) infinite;
+  transform-origin: center bottom;
+}
+
+.anim-char-arm {
+  animation: char-wave-arm 2.2s var(--ease-in-out) infinite;
+  transform-origin: 20% 80%;
+}
+
+.anim-char-wand-active {
+  animation: char-wand-burst 600ms var(--ease-out) 1;
+  transform-origin: center center;
+}
+
+.anim-char-eyes {
+  animation: char-blink 4.5s linear infinite;
+  transform-origin: center center;
+}
+
+.anim-char-plane {
+  animation: char-plane-fly 2.4s var(--ease-out) infinite;
+}
+
+.anim-char-telescope {
+  animation: char-telescope-scan 3.4s var(--ease-in-out) infinite;
+  transform-origin: 35% 65%;
+}
+
+.anim-star {
+  animation: star-pulse 2.5s var(--ease-in-out) infinite;
+  transform-origin: center center;
+}
+
+@keyframes panel-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.panel-enter {
+  animation: panel-enter 220ms var(--ease-out) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .anim-char-float,
+  .anim-char-head,
+  .anim-char-arm,
+  .anim-char-eyes,
+  .anim-char-plane,
+  .anim-char-telescope,
+  .anim-star {
+    animation: none !important;
+  }
+  .panel-enter {
+    animation-duration: 120ms;
+    transform: none !important;
+  }
 }
