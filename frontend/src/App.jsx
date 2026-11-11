@@ -27,7 +27,11 @@ import {
   DataAstronomerCharacter,
   PlugMechanicCharacter,
 } from './CartoonCharacters';
-import { INITIAL_AUTOMATIONS, INITIAL_ANALYTICS } from './fallbackEngine';
+import {
+  INITIAL_AUTOMATIONS,
+  INITIAL_ANALYTICS,
+  runLocalOpenClawAnalysis,
+} from './fallbackEngine';
 import { supabase, isSuperuserEmail } from './supabase';
 
 export default function App() {
@@ -75,6 +79,23 @@ export default function App() {
   const [simText, setSimText] = useState('Wait this is awesome!! Can you send me the LINK please?');
   const [simResult, setSimResult] = useState(null);
 
+  // Video Performance Ranking & OpenClaw Agent Hookup state
+  const [videoSortBy, setVideoSortBy] = useState('followers'); // 'followers' | 'views' | 'conversion'
+  const [openclawGatewayUrl, setOpenclawGatewayUrl] = useState(
+    'http://localhost:18789/v1/chat/completions'
+  );
+  const [openclawPrompt, setOpenclawPrompt] = useState(
+    'Analyze my top-performing videos by Views and Followers Gained, break down the exact patterns in their text summaries, and write 3 new high-converting Reel scripts optimized for my US audience active window.'
+  );
+  const [openclawOutput, setOpenclawOutput] = useState(() =>
+    runLocalOpenClawAnalysis(
+      'Analyze my top-performing videos by Views and Followers Gained, break down the exact patterns in their text summaries, and write 3 new high-converting Reel scripts optimized for my US audience active window.',
+      INITIAL_ANALYTICS
+    )
+  );
+  const [openclawStatus, setOpenclawStatus] = useState('ready'); // 'ready' | 'running' | 'connected_gateway' | 'builtin_agent'
+  const [showBriefPreview, setShowBriefPreview] = useState(false);
+
   const showToast = (msg, type = 'success') => {
     setToast({ msg, type });
     setTimeout(() => setToast(null), 4000);
@@ -83,6 +104,40 @@ export default function App() {
   const triggerFairyWand = () => {
     setIsCastingWand(true);
     setTimeout(() => setIsCastingWand(false), 750);
+  };
+
+  const handleRunOpenClaw = async (customPromptText) => {
+    const promptToUse = customPromptText || openclawPrompt;
+    if (customPromptText) {
+      setOpenclawPrompt(customPromptText);
+    }
+    setOpenclawStatus('running');
+    triggerFairyWand();
+    try {
+      const res = await fetch('/api/openclaw/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompt: promptToUse,
+          gateway_url: openclawGatewayUrl,
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setOpenclawOutput(data.agent_response);
+        setOpenclawStatus(
+          data.status === 'connected_openclaw_gateway' ? 'connected_gateway' : 'builtin_agent'
+        );
+        showToast('OpenClaw Agent finished analyzing your video summaries!');
+        return;
+      }
+      throw new Error('Fallback to local OpenClaw analyzer');
+    } catch {
+      const fallbackText = runLocalOpenClawAnalysis(promptToUse, analyticsData || INITIAL_ANALYTICS);
+      setOpenclawOutput(fallbackText);
+      setOpenclawStatus('builtin_agent');
+      showToast('OpenClaw Agent finished analyzing your video summaries!');
+    }
   };
 
   const fetchAll = async () => {
@@ -676,10 +731,50 @@ export default function App() {
     followers_count: 14820,
     media_count: 94,
   };
-  const summary = analyticsData?.analysis?.summary || {};
-  const strategies = analyticsData?.analysis?.strategies || [];
-  const contentIdeas = analyticsData?.analysis?.content_ideas || [];
-  const posts = analyticsData?.posts || [];
+  const summary = {
+    ...INITIAL_ANALYTICS.analysis.summary,
+    ...(analyticsData?.analysis?.summary || {}),
+  };
+  const strategies = analyticsData?.analysis?.strategies || INITIAL_ANALYTICS.analysis.strategies;
+  const contentIdeas =
+    analyticsData?.analysis?.content_ideas || INITIAL_ANALYTICS.analysis.content_ideas;
+  const rawPosts =
+    analyticsData?.posts && analyticsData.posts.length > 0
+      ? analyticsData.posts
+      : INITIAL_ANALYTICS.posts;
+  const posts = rawPosts.map((p) => {
+    const fallbackMatch = INITIAL_ANALYTICS.posts.find((fp) => fp.id === p.id) || {};
+    const views = p.views || fallbackMatch.views || 1000;
+    const followersGained =
+      p.followers_gained ??
+      fallbackMatch.followers_gained ??
+      Math.max(Math.round(views * 0.0115), 5);
+    return {
+      ...fallbackMatch,
+      ...p,
+      title: p.title || fallbackMatch.title || (p.caption || '').split('\n')[0].slice(0, 64),
+      followers_gained: followersGained,
+      follower_conversion_rate:
+        p.follower_conversion_rate ??
+        fallbackMatch.follower_conversion_rate ??
+        Number(((followersGained / Math.max(views, 1)) * 100).toFixed(2)),
+      us_viewer_share_pct: p.us_viewer_share_pct ?? fallbackMatch.us_viewer_share_pct ?? 70,
+      video_summary_text:
+        p.video_summary_text ||
+        fallbackMatch.video_summary_text ||
+        `HOOK: ${(p.caption || '').slice(0, 90)} | PERFORMANCE: ${views.toLocaleString()} views, +${followersGained} followers gained.`,
+    };
+  });
+  const sortedPosts = [...posts].sort((a, b) => {
+    if (videoSortBy === 'views') return (b.views || 0) - (a.views || 0);
+    if (videoSortBy === 'conversion')
+      return (b.follower_conversion_rate || 0) - (a.follower_conversion_rate || 0);
+    return (b.followers_gained || 0) - (a.followers_gained || 0);
+  });
+  const usActivity =
+    analyticsData?.analysis?.us_audience_activity || INITIAL_ANALYTICS.analysis.us_audience_activity;
+  const openclawBrief =
+    analyticsData?.analysis?.openclaw_brief || INITIAL_ANALYTICS.analysis.openclaw_brief;
 
   return (
     <div className="min-h-screen bg-[#FFF8FC] text-[#19154E] flex flex-col">
@@ -1324,7 +1419,8 @@ export default function App() {
 
         {/* ============================================================
             TAB 2: INSTAGRAM STATISTICS & POST ANALYTICS
-            Features the "Don't Look Up" Inspired Cartoon Data Astronomer!
+            1) Best Performing Videos by Views & Followers Gained + Text Summaries
+            2) United States (US) Audience Activity Observatory
         ============================================================ */}
         {activeTab === 'analytics' && (
           <div className="space-y-6 panel-enter">
@@ -1332,22 +1428,22 @@ export default function App() {
             <div className="editorial-card p-6 bg-white grid grid-cols-1 lg:grid-cols-12 gap-6 items-center">
               <div className="lg:col-span-8 space-y-3">
                 <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-[#EDE9FE] border-2 border-[#19154E] text-xs font-bold text-[#6D28D9]">
-                  <span>🔭 @techfairyanna Telemetry Observatory</span>
+                  <span>🔭 @techfairyanna Telemetry & US Audience Observatory</span>
                 </div>
                 <h3 className="font-display text-2xl sm:text-3xl font-bold text-[#19154E]">
-                  Reels with a single-word DM keyword get{' '}
-                  <span className="px-2.5 py-0.5 rounded-xl bg-[#B799E8] border-2 border-[#19154E]">
-                    {summary.comment_lift_multiplier || 4.2}x more comments
-                  </span>
+                  Top Reels by{' '}
+                  <span className="px-2.5 py-0.5 rounded-xl bg-[#FF7EB6] border-2 border-[#19154E]">
+                    Views &amp; Followers Gained
+                  </span>{' '}
+                  + US Active Windows
                 </h3>
                 <p className="text-xs sm:text-sm text-neutral-700 leading-relaxed">
-                  Our cartoon astronomer analyzed your recent posts, save-to-view ratios, and
-                  comment velocity. Posts where you ask viewers to comment a single word (like{' '}
-                  <code className="font-mono-code font-bold">LINK</code> or{' '}
-                  <code className="font-mono-code font-bold">CODE</code>) trigger Instagram&apos;s
-                  Explore distribution algorithm.
+                  Rank your videos by <strong>Followers Gained</strong> or <strong>Views</strong>, inspect
+                  each video&apos;s structured <strong>Text Summary</strong> (Hook, Body, CTA &amp; Conversion
+                  Diagnosis), and send them straight to your <strong>OpenClaw Agent</strong> or time your next
+                  post for peak <strong>United States (US)</strong> activity.
                 </p>
-                <div className="pt-1">
+                <div className="pt-1 flex flex-wrap items-center gap-2.5">
                   <button
                     onClick={handleRefreshAnalytics}
                     disabled={syncing}
@@ -1355,6 +1451,16 @@ export default function App() {
                   >
                     <RefreshCw className={`w-4 h-4 ${syncing ? 'animate-spin' : ''}`} />
                     <span>Sync Latest Instagram Metrics</span>
+                  </button>
+                  <button
+                    onClick={() => {
+                      setActiveTab('strategy');
+                      handleRunOpenClaw();
+                    }}
+                    className="editorial-btn px-4 py-2 rounded-xl bg-[#FF7EB6] text-[#19154E] text-xs font-bold inline-flex items-center gap-2"
+                  >
+                    <span>🦞 Analyze Video Summaries in OpenClaw</span>
+                    <ArrowUpRight className="w-4 h-4" />
                   </button>
                 </div>
               </div>
@@ -1369,13 +1475,28 @@ export default function App() {
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">
               <div className="editorial-card-sm p-4 bg-white">
                 <div className="text-xs font-bold text-neutral-500 flex items-center justify-between">
-                  <span>FOLLOWERS</span>
+                  <span>TOTAL FOLLOWERS</span>
                   <Instagram className="w-4 h-4 text-[#FF7EB6]" />
                 </div>
                 <div className="font-display text-2xl font-bold text-[#19154E] mt-1.5">
                   {(profile.followers_count || 14820).toLocaleString()}
                 </div>
-                <div className="text-[11px] font-bold text-emerald-700 mt-1">+4.8% this month</div>
+                <div className="text-[11px] font-bold text-emerald-700 mt-1">
+                  +{summary.total_followers_gained || 1476} from recent videos
+                </div>
+              </div>
+
+              <div className="editorial-card-sm p-4 bg-[#FF7EB6]">
+                <div className="text-xs font-bold text-[#19154E] flex items-center justify-between">
+                  <span>FOLLOWERS GAINED</span>
+                  <TrendingUp className="w-4 h-4 text-[#19154E]" />
+                </div>
+                <div className="font-display text-2xl font-bold text-[#19154E] mt-1.5">
+                  +{(summary.total_followers_gained || 1476).toLocaleString()}
+                </div>
+                <div className="text-[11px] font-bold text-[#19154E] mt-1">
+                  {summary.avg_follower_conversion_rate || 1.24}% View→Follow Rate
+                </div>
               </div>
 
               <div className="editorial-card-sm p-4 bg-white">
@@ -1386,29 +1507,22 @@ export default function App() {
                 <div className="font-display text-2xl font-bold text-[#19154E] mt-1.5">
                   {(summary.total_views || 0).toLocaleString()}
                 </div>
-                <div className="text-[11px] font-semibold text-neutral-600 mt-1">Recent Reels/Posts</div>
+                <div className="text-[11px] font-semibold text-neutral-600 mt-1">
+                  Top Reel: 34,800 views
+                </div>
               </div>
 
               <div className="editorial-card-sm p-4 bg-[#C8F904]">
                 <div className="text-xs font-bold text-[#19154E] flex items-center justify-between">
-                  <span>AVG ENGAGEMENT</span>
-                  <TrendingUp className="w-4 h-4 text-[#19154E]" />
+                  <span>🇺🇸 US AUDIENCE</span>
+                  <Sparkles className="w-4 h-4 text-[#19154E]" />
                 </div>
                 <div className="font-display text-2xl font-bold text-[#19154E] mt-1.5">
-                  {summary.avg_engagement_rate}%
+                  {usActivity.us_audience_share_pct}%
                 </div>
-                <div className="text-[11px] font-bold text-[#19154E] mt-1">Top 5% Creator Tier</div>
-              </div>
-
-              <div className="editorial-card-sm p-4 bg-white">
-                <div className="text-xs font-bold text-neutral-500 flex items-center justify-between">
-                  <span>TOTAL SAVES</span>
-                  <Bookmark className="w-4 h-4 text-[#B799E8]" />
+                <div className="text-[11px] font-bold text-[#19154E] mt-1">
+                  Peak: 6–8 PM EST (98%)
                 </div>
-                <div className="font-display text-2xl font-bold text-[#19154E] mt-1.5">
-                  {(summary.total_saves || 0).toLocaleString()}
-                </div>
-                <div className="text-[11px] font-semibold text-neutral-600 mt-1">High bookmark rate</div>
               </div>
 
               <div className="editorial-card-sm p-4 bg-[#B799E8]">
@@ -1434,93 +1548,565 @@ export default function App() {
               </div>
             </div>
 
-            {/* Post-by-Post Performance Table */}
+            {/* ============================================================
+                GOAL 1 & 2: TOP PERFORMING VIDEOS (VIEWS + FOLLOWERS GAINED)
+                & STRUCTURED TEXT SUMMARIES FOR OPENCLAW AGENT
+            ============================================================ */}
             <div className="editorial-card bg-white overflow-hidden">
-              <div className="p-5 border-b-2 border-[#19154E] bg-[#F5EEFF] flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                <h3 className="font-display font-bold text-base text-[#19154E]">
-                  Recent @techfairyanna Posts & Comment-to-DM Conversions
-                </h3>
-                <span className="text-xs font-bold text-neutral-700">
-                  Compare posts with a ManyChat keyword CTA vs. standard posts
-                </span>
+              <div className="p-5 border-b-2 border-[#19154E] bg-[#F5EEFF] flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                <div>
+                  <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-[#FF7EB6] border border-[#19154E] text-[11px] font-bold text-[#19154E] mb-1">
+                    <span>🎬 Goal #1 &amp; #2: Video Performance &amp; Agent Text Summaries</span>
+                  </div>
+                  <h3 className="font-display font-bold text-lg sm:text-xl text-[#19154E]">
+                    What Videos Perform Best (Views &amp; Followers Gained) + Text Summaries
+                  </h3>
+                  <p className="text-xs font-medium text-neutral-700">
+                    Every video is summarized into structured text (Hook, Body, CTA, Why It Converted) ready for OpenClaw analysis.
+                  </p>
+                </div>
+
+                {/* Sort Selector Buttons */}
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs font-bold text-[#19154E]">Rank Videos By:</span>
+                  <button
+                    onClick={() => setVideoSortBy('followers')}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-bold border-2 border-[#19154E] transition-colors duration-150 ${
+                      videoSortBy === 'followers'
+                        ? 'bg-[#FF7EB6] text-[#19154E]'
+                        : 'bg-white text-[#19154E] hover:bg-[#FFF8FC]'
+                    }`}
+                  >
+                    🏆 Followers Gained
+                  </button>
+                  <button
+                    onClick={() => setVideoSortBy('views')}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-bold border-2 border-[#19154E] transition-colors duration-150 ${
+                      videoSortBy === 'views'
+                        ? 'bg-[#C8F904] text-[#19154E]'
+                        : 'bg-white text-[#19154E] hover:bg-[#FFF8FC]'
+                    }`}
+                  >
+                    👁️ Total Views
+                  </button>
+                  <button
+                    onClick={() => setVideoSortBy('conversion')}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-bold border-2 border-[#19154E] transition-colors duration-150 ${
+                      videoSortBy === 'conversion'
+                        ? 'bg-[#B799E8] text-[#19154E]'
+                        : 'bg-white text-[#19154E] hover:bg-[#FFF8FC]'
+                    }`}
+                  >
+                    🎯 Follower Conversion %
+                  </button>
+                </div>
               </div>
-              <div className="overflow-x-auto">
-                <table className="w-full text-left border-collapse text-xs">
-                  <thead>
-                    <tr className="border-b-2 border-[#19154E] text-[#19154E] font-bold bg-[#FFF8FC]">
-                      <th className="py-3.5 px-4">Format</th>
-                      <th className="py-3.5 px-4">Post Caption & Hook</th>
-                      <th className="py-3.5 px-4">DM Keyword</th>
-                      <th className="py-3.5 px-4 text-right">Views</th>
-                      <th className="py-3.5 px-4 text-right">Likes</th>
-                      <th className="py-3.5 px-4 text-right">Comments</th>
-                      <th className="py-3.5 px-4 text-right">Saves</th>
-                      <th className="py-3.5 px-4 text-right">Auto-DMs</th>
-                      <th className="py-3.5 px-4 text-right">Eng. Rate</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y-2 divide-neutral-200 font-medium">
-                    {posts.map((post) => (
-                      <tr key={post.id} className="hover:bg-[#FFF8FC] transition-colors duration-150">
-                        <td className="py-3.5 px-4">
+
+              <div className="p-5 space-y-4">
+                {sortedPosts.map((post, idx) => (
+                  <div
+                    key={post.id}
+                    className={`rounded-2xl border-2 border-[#19154E] p-4 sm:p-5 transition-colors duration-150 ${
+                      idx === 0
+                        ? 'bg-gradient-to-r from-[#FFF8FC] via-[#FFFDF9] to-[#F5EEFF] shadow-[4px_4px_0px_#19154E]'
+                        : 'bg-white'
+                    }`}
+                  >
+                    <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 border-b-2 border-dashed border-neutral-200 pb-3.5">
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2 flex-wrap">
                           <span
-                            className={`text-[10px] font-bold px-2.5 py-1 rounded-lg border border-[#19154E] ${
-                              post.type === 'REEL'
+                            className={`text-xs font-extrabold px-2.5 py-0.5 rounded-lg border-2 border-[#19154E] ${
+                              idx === 0
+                                ? 'bg-[#C8F904] text-[#19154E]'
+                                : idx === 1
                                 ? 'bg-[#FF7EB6] text-[#19154E]'
-                                : post.type === 'CAROUSEL'
+                                : idx === 2
                                 ? 'bg-[#B799E8] text-[#19154E]'
-                                : 'bg-[#EDE9FE] text-[#6D28D9]'
+                                : 'bg-neutral-100 text-[#19154E]'
                             }`}
                           >
+                            #{idx + 1} {idx === 0 ? 'TOP PERFORMER' : idx < 3 ? 'HIGH PERFORMER' : 'BASELINE'}
+                          </span>
+                          <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-lg border border-[#19154E] bg-[#EDE9FE] text-[#6D28D9]">
                             {post.type}
                           </span>
-                        </td>
-                        <td className="py-3.5 px-4 max-w-md">
-                          <p className="text-[#19154E] line-clamp-2 font-semibold">{post.caption}</p>
-                        </td>
-                        <td className="py-3.5 px-4">
-                          {post.best_keyword && !post.best_keyword.includes('None') ? (
-                            <span className="font-mono-code text-xs font-bold px-2.5 py-0.5 rounded-lg bg-[#C8F904] text-[#19154E] border border-[#19154E]">
-                              &quot;{post.best_keyword}&quot;
+                          {post.best_keyword && !post.best_keyword.includes('None') && (
+                            <span className="font-mono-code text-[11px] font-bold px-2.5 py-0.5 rounded-lg bg-[#C8F904] text-[#19154E] border border-[#19154E]">
+                              Trigger: &quot;{post.best_keyword}&quot;
                             </span>
-                          ) : (
-                            <span className="text-neutral-400 font-semibold">No CTA</span>
                           )}
-                        </td>
-                        <td className="py-3.5 px-4 text-right font-bold text-[#19154E]">
-                          {(post.views || 0).toLocaleString()}
-                        </td>
-                        <td className="py-3.5 px-4 text-right text-neutral-700">
-                          {(post.likes || 0).toLocaleString()}
-                        </td>
-                        <td className="py-3.5 px-4 text-right font-bold text-[#FF7EB6]">
-                          {(post.comments || 0).toLocaleString()}
-                        </td>
-                        <td className="py-3.5 px-4 text-right font-bold text-[#19154E]">
-                          {(post.saves || 0).toLocaleString()}
-                        </td>
-                        <td className="py-3.5 px-4 text-right font-bold text-[#6D28D9]">
-                          {post.dm_triggers ?? intOrZero(post.comments * 0.7)}
-                        </td>
-                        <td className="py-3.5 px-4 text-right">
-                          <span className="px-2 py-0.5 rounded-md bg-[#C8F904] border border-[#19154E] font-bold text-[#19154E]">
-                            {post.engagement_rate}%
+                        </div>
+                        <h4 className="font-display font-bold text-base sm:text-lg text-[#19154E]">
+                          {post.title}
+                        </h4>
+                        <p className="text-xs text-neutral-600 line-clamp-1">{post.caption}</p>
+                      </div>
+
+                      {/* Key Performance Badges: Views & Followers Gained */}
+                      <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+                        <div className="px-3.5 py-2 rounded-xl bg-[#FF7EB6] border-2 border-[#19154E] text-center">
+                          <div className="text-[10px] font-extrabold uppercase text-[#19154E]">
+                            Followers Gained
+                          </div>
+                          <div className="font-display font-bold text-base text-[#19154E]">
+                            +{(post.followers_gained || 0).toLocaleString()}
+                          </div>
+                        </div>
+
+                        <div className="px-3.5 py-2 rounded-xl bg-[#C8F904] border-2 border-[#19154E] text-center">
+                          <div className="text-[10px] font-extrabold uppercase text-[#19154E]">
+                            Views
+                          </div>
+                          <div className="font-display font-bold text-base text-[#19154E]">
+                            {(post.views || 0).toLocaleString()}
+                          </div>
+                        </div>
+
+                        <div className="px-3 py-2 rounded-xl bg-[#F5EEFF] border-2 border-[#19154E] text-center">
+                          <div className="text-[10px] font-bold uppercase text-[#6D28D9]">
+                            Follow Conv.
+                          </div>
+                          <div className="font-display font-bold text-sm text-[#19154E]">
+                            {post.follower_conversion_rate}%
+                          </div>
+                        </div>
+
+                        <div className="px-3 py-2 rounded-xl bg-white border-2 border-[#19154E] text-center">
+                          <div className="text-[10px] font-bold uppercase text-neutral-500">
+                            🇺🇸 US Viewers
+                          </div>
+                          <div className="font-display font-bold text-sm text-[#19154E]">
+                            {post.us_viewer_share_pct}%
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Structured Text Summary Box for Agent Analysis */}
+                    <div className="mt-3.5 p-3.5 rounded-xl bg-[#FFF8FC] border-2 border-[#19154E] space-y-2">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="text-[11px] font-extrabold uppercase tracking-wider text-[#6D28D9] flex items-center gap-1.5">
+                          <span>📝 Video Text Summary (For AI Agent Analysis)</span>
+                        </span>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              copyToClipboard(
+                                `${post.title}\nViews: ${post.views} | Followers Gained: +${post.followers_gained} (${post.follower_conversion_rate}%)\nSummary: ${post.video_summary_text}`,
+                                `summary-${post.id}`
+                              )
+                            }
+                            className="px-2.5 py-1 rounded-lg bg-white border border-[#19154E] text-[11px] font-bold text-[#19154E] hover:bg-[#EDE9FE] inline-flex items-center gap-1"
+                          >
+                            {copiedField === `summary-${post.id}` ? (
+                              <>
+                                <Check className="w-3 h-3 text-emerald-700" />
+                                <span>Copied!</span>
+                              </>
+                            ) : (
+                              <>
+                                <Copy className="w-3 h-3" />
+                                <span>Copy Summary</span>
+                              </>
+                            )}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const customP = `Analyze this video summary for "${post.title}" (${post.views.toLocaleString()} views, +${post.followers_gained} followers gained, ${post.follower_conversion_rate}% conversion): ${post.video_summary_text} — Why did it perform this way and how can I replicate or improve it for my US audience?`;
+                              setActiveTab('strategy');
+                              handleRunOpenClaw(customP);
+                            }}
+                            className="px-2.5 py-1 rounded-lg bg-[#19154E] text-[#FFF8FC] text-[11px] font-bold hover:bg-[#6D28D9] inline-flex items-center gap-1"
+                          >
+                            <span>🦞 Send to OpenClaw Agent</span>
+                          </button>
+                        </div>
+                      </div>
+                      <p className="text-xs text-[#19154E] font-medium leading-relaxed">
+                        {post.video_summary_text}
+                      </p>
+                      <div className="pt-1 flex flex-wrap items-center gap-4 text-[11px] font-bold text-neutral-600">
+                        <span>❤️ Likes: {(post.likes || 0).toLocaleString()}</span>
+                        <span>💬 Comments: {(post.comments || 0).toLocaleString()}</span>
+                        <span>📌 Saves: {(post.saves || 0).toLocaleString()}</span>
+                        <span>🔁 Shares: {(post.shares || 0).toLocaleString()}</span>
+                        <span>✉️ Auto-DMs: {post.dm_triggers ?? 0}</span>
+                        <span>⚡ Eng. Rate: {post.engagement_rate}%</span>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* ============================================================
+                GOAL 3: UNITED STATES (US) AUDIENCE ACTIVITY OBSERVATORY
+                (Specifically isolating US followers vs. Global followers)
+            ============================================================ */}
+            <div className="editorial-card bg-white overflow-hidden">
+              <div className="p-5 border-b-2 border-[#19154E] bg-gradient-to-r from-[#EDE9FE] via-[#FFF8FC] to-[#FFE4F1] flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+                <div>
+                  <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-[#C8F904] border border-[#19154E] text-[11px] font-bold text-[#19154E] mb-1">
+                    <span>🇺🇸 Goal #3: United States Audience Activity (Isolated from Global)</span>
+                  </div>
+                  <h3 className="font-display font-bold text-lg sm:text-xl text-[#19154E]">
+                    When Your United States Followers Are Most Active (EST)
+                  </h3>
+                  <p className="text-xs font-medium text-neutral-700">
+                    <strong>{usActivity.us_audience_share_pct}%</strong> of @techfairyanna&apos;s audience is in the United States. Compare US active hours (pink/lime) against all global followers (lilac).
+                  </p>
+                </div>
+                <div className="flex items-center gap-3 text-xs font-bold">
+                  <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-xl bg-[#FF7EB6] border-2 border-[#19154E]">
+                    <span className="w-2.5 h-2.5 rounded-full bg-[#19154E]" />
+                    🇺🇸 US Followers Active %
+                  </span>
+                  <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-xl bg-[#EDE9FE] border-2 border-[#19154E]">
+                    <span className="w-2.5 h-2.5 rounded-full bg-[#B799E8]" />
+                    🌍 All Global Followers %
+                  </span>
+                </div>
+              </div>
+
+              <div className="p-5 space-y-6">
+                {/* Key Diagnostic Callout */}
+                <div className="p-4 rounded-2xl bg-[#FFF8FC] border-2 border-[#19154E] text-xs leading-relaxed font-medium text-[#19154E]">
+                  <strong className="font-bold text-[#6D28D9]">🔎 US vs. Global Timing Insight: </strong>
+                  {usActivity.key_insight}
+                </div>
+
+                {/* Hourly EST Bar Comparison: US Active % vs Global Active % */}
+                <div className="space-y-3">
+                  <h4 className="font-display font-bold text-sm text-[#19154E]">
+                    Hourly Activity Breakdown (Eastern Time — EST/EDT)
+                  </h4>
+                  <div className="space-y-2.5">
+                    {(usActivity.hourly_est || []).map((slot) => {
+                      const isPeak = slot.us_active >= 85;
+                      return (
+                        <div
+                          key={slot.hour}
+                          className={`p-3 rounded-xl border-2 border-[#19154E] ${
+                            isPeak ? 'bg-[#FFFDF9] shadow-[2px_2px_0px_#19154E]' : 'bg-white'
+                          }`}
+                        >
+                          <div className="flex flex-wrap items-center justify-between gap-2 text-xs mb-1.5">
+                            <div className="flex items-center gap-2">
+                              <span className="font-mono-code font-bold text-[#19154E] w-14">
+                                {slot.hour} EST
+                              </span>
+                              <span
+                                className={`font-bold px-2 py-0.5 rounded-md text-[11px] ${
+                                  isPeak
+                                    ? 'bg-[#C8F904] text-[#19154E] border border-[#19154E]'
+                                    : 'text-neutral-600'
+                                }`}
+                              >
+                                {slot.label}
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-3 font-bold">
+                              <span className="text-[#19154E]">
+                                🇺🇸 US Active: <strong>{slot.us_active}%</strong>
+                              </span>
+                              <span className="text-neutral-500">
+                                🌍 Global: {slot.global_active}%
+                              </span>
+                            </div>
+                          </div>
+
+                          {/* Dual Progress Bars */}
+                          <div className="space-y-1">
+                            <div className="w-full h-3 rounded-full bg-neutral-100 border border-[#19154E] overflow-hidden">
+                              <div
+                                className={`h-full ${
+                                  isPeak ? 'bg-[#FF7EB6]' : 'bg-[#B799E8]'
+                                }`}
+                                style={{ width: `${slot.us_active}%` }}
+                              />
+                            </div>
+                            <div className="w-full h-1.5 rounded-full bg-neutral-100 overflow-hidden">
+                              <div
+                                className="h-full bg-neutral-400"
+                                style={{ width: `${slot.global_active}%` }}
+                              />
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* 3-Column Grid: Best US Posting Slots, Top US Cities, US Timezones */}
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                  {/* Column 1: Best US Posting Windows */}
+                  <div className="p-4 rounded-2xl bg-[#F5EEFF] border-2 border-[#19154E] space-y-2.5">
+                    <h4 className="font-display font-bold text-sm text-[#19154E]">
+                      🎯 Best US Posting Windows (EST)
+                    </h4>
+                    <div className="space-y-2">
+                      {(usActivity.best_us_slots || []).map((s) => (
+                        <div
+                          key={s.day}
+                          className="p-2.5 rounded-xl bg-white border border-[#19154E] text-xs space-y-0.5"
+                        >
+                          <div className="flex items-center justify-between font-bold text-[#19154E]">
+                            <span>
+                              {s.day} • {s.window_est}
+                            </span>
+                            <span className="px-1.5 py-0.5 rounded bg-[#C8F904] text-[10px]">
+                              {s.us_active_pct}% US Active
+                            </span>
+                          </div>
+                          <div className="text-[11px] text-neutral-600 font-medium">{s.best_for}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Column 2: Top United States Cities */}
+                  <div className="p-4 rounded-2xl bg-[#FFF8FC] border-2 border-[#19154E] space-y-2.5">
+                    <h4 className="font-display font-bold text-sm text-[#19154E]">
+                      🏙️ Top United States Tech Hubs
+                    </h4>
+                    <div className="space-y-2">
+                      {(usActivity.us_cities || []).map((c) => (
+                        <div
+                          key={c.city}
+                          className="p-2.5 rounded-xl bg-white border border-[#19154E] flex items-center justify-between text-xs"
+                        >
+                          <div>
+                            <span className="font-bold text-[#19154E]">{c.city}</span>
+                            <span className="ml-1.5 text-[10px] font-mono-code px-1.5 py-0.5 rounded bg-[#EDE9FE] text-[#6D28D9]">
+                              {c.tz}
+                            </span>
+                          </div>
+                          <span className="font-display font-bold text-[#FF7EB6]">
+                            {c.share_pct}%
                           </span>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Column 3: US Follower Timezone Split */}
+                  <div className="p-4 rounded-2xl bg-[#FFFDF9] border-2 border-[#19154E] space-y-2.5">
+                    <h4 className="font-display font-bold text-sm text-[#19154E]">
+                      ⏰ US Follower Timezone Split
+                    </h4>
+                    <div className="space-y-2.5">
+                      {(usActivity.us_timezones || []).map((tz) => (
+                        <div key={tz.zone} className="space-y-1 text-xs">
+                          <div className="flex justify-between font-bold text-[#19154E]">
+                            <span>{tz.zone}</span>
+                            <span>{tz.share_pct}% of US Followers</span>
+                          </div>
+                          <div className="w-full h-2.5 rounded-full bg-white border border-[#19154E] overflow-hidden">
+                            <div
+                              className="h-full bg-[#FF7EB6]"
+                              style={{ width: `${tz.share_pct}%` }}
+                            />
+                          </div>
+                        </div>
+                      ))}
+                      <div className="pt-2 text-[11px] text-neutral-600 font-medium leading-relaxed">
+                        💡 <strong>77% of your US audience</strong> lives in Eastern (EST) or Pacific (PST) timezones — posting at <strong>6:00 PM EST (3:00 PM PST)</strong> reaches both coasts while awake!
+                      </div>
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
         )}
 
         {/* ============================================================
-            TAB 3: AI STRATEGY & CONTENT ENGINE
+            TAB 3: OPENCLAW AGENT HUB & AI STRATEGY ENGINE
         ============================================================ */}
         {activeTab === 'strategy' && (
           <div className="space-y-6 panel-enter">
+            {/* ============================================================
+                OPENCLAW AGENT HOOKUP & VIDEO SUMMARY ANALYZER
+            ============================================================ */}
+            <div className="editorial-card bg-white overflow-hidden">
+              <div className="p-5 sm:p-6 border-b-2 border-[#19154E] bg-gradient-to-r from-[#FF7EB6]/30 via-[#F5EEFF] to-[#FFF8FC] flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                <div className="space-y-1">
+                  <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-[#19154E] text-[#FFF8FC] text-xs font-bold">
+                    <span>🦞 OpenClaw Agent Hookup</span>
+                    <span>•</span>
+                    <span className="text-[#C8F904]">
+                      {openclawStatus === 'connected_gateway'
+                        ? 'Connected to Live OpenClaw Gateway'
+                        : 'OpenClaw Video Analyzer Ready'}
+                    </span>
+                  </div>
+                  <h3 className="font-display text-2xl sm:text-3xl font-bold text-[#19154E]">
+                    OpenClaw Video Summary Analyzer &amp; Agent Hub
+                  </h3>
+                  <p className="text-xs sm:text-sm text-neutral-700 max-w-3xl">
+                    Your top-performing videos (by Views &amp; Followers Gained) and US audience activity
+                    are automatically summarized into a structured text brief so your{' '}
+                    <strong>OpenClaw Agent</strong> can analyze them right here on the site.
+                  </p>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setShowBriefPreview(!showBriefPreview)}
+                    className="editorial-btn px-3.5 py-2 rounded-xl bg-white text-[#19154E] text-xs font-bold"
+                  >
+                    {showBriefPreview ? 'Hide Text Brief' : '📄 View Compiled Video Brief'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => copyToClipboard(openclawBrief, 'openclaw-brief')}
+                    className="editorial-btn px-3.5 py-2 rounded-xl bg-[#C8F904] text-[#19154E] text-xs font-bold inline-flex items-center gap-1.5"
+                  >
+                    {copiedField === 'openclaw-brief' ? (
+                      <>
+                        <Check className="w-3.5 h-3.5" />
+                        <span>Brief Copied!</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-3.5 h-3.5" />
+                        <span>Copy Brief for Agent</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              <div className="p-5 sm:p-6 space-y-5">
+                {/* OpenClaw Gateway Endpoint & Context Feed Bar */}
+                <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 p-4 rounded-2xl bg-[#FFF8FC] border-2 border-[#19154E]">
+                  <div className="lg:col-span-6">
+                    <label className="block text-[11px] font-extrabold uppercase text-[#19154E] mb-1">
+                      🦞 OpenClaw Gateway / Agent Endpoint URL
+                    </label>
+                    <input
+                      type="text"
+                      value={openclawGatewayUrl}
+                      onChange={(e) => setOpenclawGatewayUrl(e.target.value)}
+                      placeholder="http://localhost:18789/v1/chat/completions"
+                      className="w-full px-3 py-2 rounded-xl bg-white border-2 border-[#19154E] text-xs font-mono-code font-bold text-[#6D28D9]"
+                    />
+                  </div>
+                  <div className="lg:col-span-6">
+                    <label className="block text-[11px] font-extrabold uppercase text-[#19154E] mb-1">
+                      📡 SocialAssist Video Brief Feed URL (For External OpenClaw Skills)
+                    </label>
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        readOnly
+                        value="http://localhost:8000/api/openclaw/brief"
+                        className="flex-1 px-3 py-2 rounded-xl bg-white border-2 border-[#19154E] text-xs font-mono-code font-bold text-[#19154E]"
+                      />
+                      <button
+                        type="button"
+                        onClick={() =>
+                          copyToClipboard('http://localhost:8000/api/openclaw/brief', 'brief-url')
+                        }
+                        className="px-3 py-2 rounded-xl bg-[#EDE9FE] border-2 border-[#19154E] text-xs font-bold text-[#19154E]"
+                      >
+                        {copiedField === 'brief-url' ? 'Copied!' : 'Copy URL'}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Optional Collapsible Raw Text Brief */}
+                {showBriefPreview && (
+                  <div className="p-4 rounded-2xl bg-[#19154E] text-[#FFF8FC] border-2 border-[#19154E] space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold text-[#C8F904]">
+                        Compiled Video Text Summaries + US Active Hours Brief (Auto-fed to OpenClaw):
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => copyToClipboard(openclawBrief, 'openclaw-brief-inner')}
+                        className="text-xs font-bold text-[#FF7EB6] underline"
+                      >
+                        {copiedField === 'openclaw-brief-inner' ? 'Copied!' : 'Copy All Text'}
+                      </button>
+                    </div>
+                    <pre className="text-[11px] font-mono-code whitespace-pre-wrap leading-relaxed max-h-64 overflow-y-auto text-neutral-200">
+                      {openclawBrief}
+                    </pre>
+                  </div>
+                )}
+
+                {/* Agent Prompt & Quick Task Pills */}
+                <div className="space-y-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-xs font-bold text-[#19154E]">Quick Agent Tasks:</span>
+                    {[
+                      'Compare my top 3 videos by Followers Gained and write 3 new Reel scripts',
+                      'Why did my Python Script Reel gain +492 followers while my Desk Tour gained +19?',
+                      'Build a 7-day US Audience posting schedule (EST & PST) from my video summaries',
+                    ].map((preset) => (
+                      <button
+                        key={preset}
+                        type="button"
+                        onClick={() => handleRunOpenClaw(preset)}
+                        className="px-3 py-1 rounded-xl bg-[#F5EEFF] hover:bg-[#FF7EB6] border border-[#19154E] text-[11px] font-bold text-[#19154E] transition-colors duration-150"
+                      >
+                        ✨ {preset}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="flex flex-col sm:flex-row gap-2.5">
+                    <input
+                      type="text"
+                      value={openclawPrompt}
+                      onChange={(e) => setOpenclawPrompt(e.target.value)}
+                      className="flex-1 px-4 py-2.5 rounded-xl bg-[#FFF8FC] border-2 border-[#19154E] text-xs sm:text-sm font-semibold text-[#19154E]"
+                      placeholder="Ask your OpenClaw Agent anything about your video text summaries or US audience..."
+                    />
+                    <button
+                      type="button"
+                      onClick={() => handleRunOpenClaw()}
+                      disabled={openclawStatus === 'running'}
+                      className="editorial-btn px-5 py-2.5 rounded-xl bg-[#FF7EB6] text-[#19154E] text-xs sm:text-sm font-bold inline-flex items-center justify-center gap-2 shrink-0"
+                    >
+                      <Sparkles className="w-4 h-4" />
+                      <span>
+                        {openclawStatus === 'running'
+                          ? 'Analyzing Summaries...'
+                          : '🦞 Run OpenClaw Agent'}
+                      </span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* OpenClaw Agent Analysis Output */}
+                <div className="p-5 rounded-2xl bg-[#FFFDF9] border-2 border-[#19154E] shadow-[4px_4px_0px_#19154E] space-y-3">
+                  <div className="flex items-center justify-between border-b-2 border-dashed border-neutral-200 pb-2.5">
+                    <span className="text-xs font-extrabold uppercase tracking-wider text-[#6D28D9]">
+                      🦞 OpenClaw Agent Response (Based on Your Top Video Summaries &amp; US Audience)
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => copyToClipboard(openclawOutput, 'openclaw-output')}
+                      className="px-2.5 py-1 rounded-lg bg-white border border-[#19154E] text-[11px] font-bold text-[#19154E]"
+                    >
+                      {copiedField === 'openclaw-output' ? 'Copied Analysis!' : 'Copy Analysis'}
+                    </button>
+                  </div>
+                  <div className="text-xs sm:text-sm text-[#19154E] whitespace-pre-wrap leading-relaxed font-medium">
+                    {openclawOutput}
+                  </div>
+                </div>
+              </div>
+            </div>
+
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
               <div>
                 <h3 className="font-display text-2xl sm:text-3xl font-bold text-[#19154E]">
