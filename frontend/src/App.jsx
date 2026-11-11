@@ -40,6 +40,14 @@ export default function App() {
   const [toast, setToast] = useState(null);
   const [isCastingWand, setIsCastingWand] = useState(false);
 
+  // Admin Login Gate state (protects studio from public visitors)
+  const [isAuthenticated, setIsAuthenticated] = useState(
+    () => sessionStorage.getItem('sa_authenticated') === 'true'
+  );
+  const [loginUser, setLoginUser] = useState('techfairyanna');
+  const [loginPassword, setLoginPassword] = useState('');
+  const [loginError, setLoginError] = useState('');
+
   // Connect form state
   const [handleInput, setHandleInput] = useState('techfairyanna');
   const [tokenInput, setTokenInput] = useState('');
@@ -411,6 +419,112 @@ export default function App() {
     setTimeout(() => setCopiedField(null), 2000);
   };
 
+  const handleAdminLogin = async (e) => {
+    e.preventDefault();
+    setLoginError('');
+    const raw = `${loginUser.trim().toLowerCase()}:${loginPassword}`;
+    const msgBuffer = new TextEncoder().encode(raw);
+    const hashBuffer = await crypto.subtle.digest('SHA-256', msgBuffer);
+    const hashHex = Array.from(new Uint8Array(hashBuffer))
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('');
+
+    const expectedHash =
+      localStorage.getItem('sa_custom_pass_hash') ||
+      'eb041c7ded7b3a19c0066954e0300257244c0c807c93e64a596d5808cda24172';
+
+    if (hashHex === expectedHash) {
+      sessionStorage.setItem('sa_authenticated', 'true');
+      setIsAuthenticated(true);
+      setLoginPassword('');
+      triggerFairyWand();
+    } else {
+      setLoginError('Invalid studio credentials. Only @techfairyanna can unlock this studio.');
+    }
+  };
+
+  const handleLockStudio = () => {
+    sessionStorage.removeItem('sa_authenticated');
+    setIsAuthenticated(false);
+  };
+
+  if (!isAuthenticated) {
+    return (
+      <div className="min-h-screen bg-[#FFF8FC] text-[#19154E] flex items-center justify-center p-4">
+        <div className="editorial-card max-w-md w-full p-7 sm:p-8 bg-white space-y-5 panel-enter">
+          <div className="flex flex-col items-center text-center space-y-2">
+            <div className="w-36 h-36">
+              <TechFairyCharacter isCasting={false} />
+            </div>
+            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#FFE4F1] border-2 border-[#19154E] text-xs font-bold">
+              <ShieldCheck className="w-4 h-4 text-[#19154E]" />
+              <span>Private Creator Studio</span>
+            </span>
+            <h1 className="font-display text-2xl sm:text-3xl font-bold text-[#19154E]">
+              SocialAssist Login
+            </h1>
+            <p className="text-xs text-neutral-600 font-medium">
+              Protected workspace for <strong>@techfairyanna</strong>. Enter your studio password to unlock.
+            </p>
+          </div>
+
+          {loginError && (
+            <div className="p-3 rounded-xl bg-[#FFE4F1] border-2 border-[#19154E] text-xs font-bold text-[#19154E] text-center">
+              {loginError}
+            </div>
+          )}
+
+          <form onSubmit={handleAdminLogin} className="space-y-4">
+            <div>
+              <label className="block text-xs font-bold text-[#19154E] mb-1">
+                Creator Handle
+              </label>
+              <input
+                type="text"
+                required
+                value={loginUser}
+                onChange={(e) => setLoginUser(e.target.value)}
+                className="w-full px-3.5 py-2.5 rounded-xl bg-[#FFF8FC] border-2 border-[#19154E] text-sm font-bold focus:outline-none focus:bg-white"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold text-[#19154E] mb-1">
+                Studio Password
+              </label>
+              <input
+                type="password"
+                required
+                autoFocus
+                placeholder="••••••••••••"
+                value={loginPassword}
+                onChange={(e) => setLoginPassword(e.target.value)}
+                className="w-full px-3.5 py-2.5 rounded-xl bg-[#FFF8FC] border-2 border-[#19154E] text-sm font-mono-code focus:outline-none focus:bg-white"
+              />
+            </div>
+
+            <button
+              type="submit"
+              className="w-full editorial-btn py-3 rounded-2xl bg-[#FF7EB6] text-[#19154E] font-display font-bold text-sm flex items-center justify-center gap-2"
+            >
+              <KeyRound className="w-4 h-4" />
+              <span>Unlock Studio ✨</span>
+            </button>
+          </form>
+
+          <div className="pt-2 border-t border-neutral-200 text-center">
+            <a
+              href="../index.html"
+              className="text-xs font-bold text-neutral-500 hover:text-[#19154E]"
+            >
+              ← Return to TechFairyLab
+            </a>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   if (loading) {
     return (
       <div className="min-h-screen bg-[#FFF8FC] text-[#19154E] flex items-center justify-center">
@@ -530,6 +644,13 @@ export default function App() {
                   connection?.has_access_token ? 'bg-[#C8F904]' : 'bg-[#B799E8]'
                 }`}
               />
+            </button>
+            <button
+              onClick={handleLockStudio}
+              title="Lock Studio"
+              className="px-2.5 py-2 rounded-xl text-xs font-bold text-[#19154E] hover:bg-[#FFE4F1] transition-colors duration-150"
+            >
+              🔒
             </button>
           </nav>
         </div>
