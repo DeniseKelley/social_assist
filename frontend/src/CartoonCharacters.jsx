@@ -1,117 +1,94 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 
 /**
- * 1. TechFairyCharacter ("Fairy Anna" — Fae_cute_sticker.PNG)
- * Uses Anna's official Fae_cute_sticker with animated fairy wings, floating sparkles,
- * magic wand, and flying DM envelopes in Fae's signature bubblegum pink (#FF7EB6) & lilac (#B799E8).
+ * 1. TechFairyCharacter ("Fairy Anna" — Animated Cartoon Fae Sticker)
+ * Pure animated Fae character (zero background clutter behind the sticker!):
+ * - Natural periodic blinking using hand-matched 4x supersampled frames (fae_cute_sticker.png -> fae_cute_blink.png)
+ * - Happy talking/laughing expression (fae_cute_talk.png) when clicked or when sending a DM
+ * - Independent head-tilt, squash-and-stretch bounce, and floating speech bubble
  */
 export function TechFairyCharacter({ isCasting = false }) {
+  const [frame, setFrame] = useState('open'); // 'open' | 'blink' | 'talk'
+  const [isBouncing, setIsBouncing] = useState(false);
+
+  // Natural periodic eye blinking loop
+  useEffect(() => {
+    if (isCasting) {
+      setFrame('talk');
+      setIsBouncing(true);
+      const t = setTimeout(() => {
+        setFrame('open');
+        setIsBouncing(false);
+      }, 900);
+      return () => clearTimeout(t);
+    }
+
+    let blinkTimeout;
+    const interval = setInterval(() => {
+      setFrame('blink');
+      blinkTimeout = setTimeout(() => {
+        setFrame('open');
+      }, 170);
+    }, 3400);
+
+    return () => {
+      clearInterval(interval);
+      clearTimeout(blinkTimeout);
+    };
+  }, [isCasting]);
+
+  const handleManualPoke = () => {
+    setIsBouncing(true);
+    setFrame('talk');
+    setTimeout(() => {
+      setFrame('blink');
+      setTimeout(() => {
+        setFrame('open');
+        setIsBouncing(false);
+      }, 140);
+    }, 650);
+  };
+
+  const currentSrc =
+    frame === 'blink'
+      ? './fae_cute_blink.png'
+      : frame === 'talk'
+      ? './fae_cute_talk.png'
+      : './fae_cute_sticker.png';
+
   return (
-    <div className="relative w-full h-full flex items-center justify-center select-none">
-      {/* Ambient SVG Halo, Animated Wings, Wand & Flying DM Envelope */}
-      <svg
-        viewBox="0 0 260 230"
-        className="w-full h-full overflow-visible"
-        aria-label="Animated Fae Cute Sticker dispatching Instagram DMs"
-      >
-        {/* Soft Lilac & Pink Backdrop Circle */}
-        <circle cx="130" cy="120" r="82" fill="#F5EEFF" stroke="#19154E" strokeWidth="2.5" />
-        <circle cx="48" cy="54" r="10" fill="#FF7EB6" stroke="#19154E" strokeWidth="2" />
-        <circle cx="214" cy="172" r="8" fill="#B799E8" stroke="#19154E" strokeWidth="2" />
+    <div
+      onClick={handleManualPoke}
+      className="relative w-full h-full flex items-center justify-center select-none cursor-pointer group"
+      aria-label="Animated Fae cartoon character"
+    >
+      {/* Cute Speech Bubble when talking / sending DM */}
+      {(frame === 'talk' || isCasting) && (
+        <div className="absolute -top-3 right-0 z-20 px-3 py-1 rounded-2xl bg-[#FF7EB6] text-[#19154E] border-2 border-[#19154E] shadow-[3px_3px_0px_#19154E] text-xs font-display font-bold panel-enter">
+          Sent DM! 💌✨
+        </div>
+      )}
 
-        {/* Floating Sparkles */}
-        <g className="anim-star" style={{ transformOrigin: '44px 142px' }}>
-          <path
-            d="M44 130 L47 139 L56 142 L47 145 L44 154 L41 145 L32 142 L41 139 Z"
-            fill="#FF7EB6"
-            stroke="#19154E"
-            strokeWidth="2"
-            strokeLinejoin="round"
-          />
-        </g>
-        <g className="anim-star" style={{ transformOrigin: '215px 52px', animationDelay: '0.8s' }}>
-          <path
-            d="M215 40 L218 49 L227 52 L218 55 L215 64 L212 55 L203 52 L212 49 Z"
-            fill="#B799E8"
-            stroke="#19154E"
-            strokeWidth="2"
-            strokeLinejoin="round"
-          />
-        </g>
+      {/* Preload frames so transitions are instant with zero flicker */}
+      <div className="hidden" aria-hidden="true">
+        <img src="./fae_cute_sticker.png" alt="" />
+        <img src="./fae_cute_blink.png" alt="" />
+        <img src="./fae_cute_talk.png" alt="" />
+      </div>
 
-        {/* Animated Fairy Wings Behind Fae */}
-        <g className="anim-char-float">
-          <path
-            d="M85 118 C25 70, 14 132, 72 152 C38 164, 50 194, 92 170 Z"
-            fill="#FFE4F1"
-            stroke="#19154E"
-            strokeWidth="2.5"
-            strokeLinejoin="round"
-          />
-          <path
-            d="M175 118 C235 70, 246 132, 188 152 C222 164, 210 194, 168 170 Z"
-            fill="#FFE4F1"
-            stroke="#19154E"
-            strokeWidth="2.5"
-            strokeLinejoin="round"
-          />
-
-          {/* Animated Magic Wand on Right */}
-          <g
-            className={isCasting ? 'anim-char-wand-active' : 'anim-char-arm'}
-            style={{ transformOrigin: '175px 165px' }}
-          >
-            <line
-              x1="175"
-              y1="165"
-              x2="218"
-              y2="82"
-              stroke="#19154E"
-              strokeWidth="4.5"
-              strokeLinecap="round"
-            />
-            <path
-              d="M220 66 L224 76 L234 79 L224 83 L220 93 L216 83 L206 79 L216 76 Z"
-              fill="#FF7EB6"
-              stroke="#19154E"
-              strokeWidth="2.2"
-              strokeLinejoin="round"
-            />
-          </g>
-
-          {/* Flying DM Envelope in Fae Pink & Lilac */}
-          <g className="anim-char-plane" transform="translate(184, 30)">
-            <rect
-              x="0"
-              y="0"
-              width="38"
-              height="25"
-              rx="6"
-              fill="#FFFFFF"
-              stroke="#19154E"
-              strokeWidth="2.5"
-            />
-            <path
-              d="M2 3 L19 15 L36 3"
-              fill="none"
-              stroke="#19154E"
-              strokeWidth="2.2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-            <circle cx="33" cy="2" r="5.5" fill="#FF7EB6" stroke="#19154E" strokeWidth="1.8" />
-          </g>
-        </g>
-      </svg>
-
-      {/* Official Fae Cute Sticker Image Centered & Bobbing */}
-      <img
-        src="./fae_cute_sticker.png"
-        alt="Fae Cute Sticker"
-        className={`absolute w-40 h-40 sm:w-44 sm:h-44 object-contain pointer-events-none drop-shadow-[0_6px_12px_rgba(25,21,78,0.16)] ${
-          isCasting ? 'anim-char-wand-active' : 'anim-char-float'
+      {/* Animated Cartoon Fae Character (Head tilt + bounce + blinking/talking frames) */}
+      <div
+        className={`relative w-44 h-44 sm:w-52 sm:h-52 flex items-center justify-center ${
+          isBouncing ? 'anim-char-wand-active' : 'anim-char-head'
         }`}
-      />
+        style={{ transformOrigin: '50% 82%' }}
+      >
+        <img
+          src={currentSrc}
+          alt="Animated Fae Character"
+          className="w-full h-full object-contain drop-shadow-[0_8px_16px_rgba(25,21,78,0.14)] transition-transform duration-150"
+        />
+      </div>
     </div>
   );
 }
@@ -126,10 +103,8 @@ export function DataAstronomerCharacter() {
       className="w-full h-full select-none overflow-visible"
       aria-label="Cartoon astronomer peering through a telescope at Instagram metrics"
     >
-      {/* Soft Lilac backdrop */}
       <circle cx="140" cy="112" r="76" fill="#F5EEFF" stroke="#19154E" strokeWidth="2.5" />
 
-      {/* Floating Metric Planet & Stars */}
       <g className="anim-star" style={{ transformOrigin: '225px 48px' }}>
         <circle cx="225" cy="48" r="16" fill="#FF7EB6" stroke="#19154E" strokeWidth="2.5" />
         <ellipse
@@ -148,7 +123,6 @@ export function DataAstronomerCharacter() {
       </g>
 
       <g className="anim-char-float">
-        {/* Character Body / Lilac Sweater like Fae */}
         <path
           d="M54 190 C54 140, 128 140, 128 190 Z"
           fill="#B799E8"
@@ -164,13 +138,11 @@ export function DataAstronomerCharacter() {
           strokeLinejoin="round"
         />
 
-        {/* Character Head Tilted Up ("Looking Up!") with Fae Pink Hair */}
         <g className="anim-char-head" style={{ transformOrigin: '90px 135px' }}>
           <circle cx="68" cy="82" r="14" fill="#FF7EB6" stroke="#19154E" strokeWidth="2.5" />
           <circle cx="88" cy="72" r="15" fill="#FF7EB6" stroke="#19154E" strokeWidth="2.5" />
           <circle cx="108" cy="80" r="12" fill="#FF7EB6" stroke="#19154E" strokeWidth="2.5" />
 
-          {/* Head */}
           <rect
             x="62"
             y="80"
@@ -182,7 +154,6 @@ export function DataAstronomerCharacter() {
             strokeWidth="3"
           />
 
-          {/* Wide Amazed Eyes Looking Up-Right */}
           <g className="anim-char-eyes" style={{ transformOrigin: '95px 104px' }}>
             <circle cx="84" cy="104" r="9" fill="#FFFFFF" stroke="#19154E" strokeWidth="2.5" />
             <circle cx="106" cy="104" r="11" fill="#FFFFFF" stroke="#19154E" strokeWidth="2.5" />
@@ -190,7 +161,6 @@ export function DataAstronomerCharacter() {
             <circle cx="109" cy="101" r="4.5" fill="#19154E" />
           </g>
 
-          {/* Excited Smile */}
           <ellipse
             cx="97"
             cy="122"
@@ -202,7 +172,6 @@ export function DataAstronomerCharacter() {
           />
         </g>
 
-        {/* Giant Animated Pink & Lilac Telescope on Tripod */}
         <g>
           <line x1="162" y1="138" x2="142" y2="190" stroke="#19154E" strokeWidth="4" strokeLinecap="round" />
           <line x1="162" y1="138" x2="164" y2="192" stroke="#19154E" strokeWidth="4" strokeLinecap="round" />
@@ -245,7 +214,6 @@ export function PlugMechanicCharacter({ connected = false }) {
       aria-label="Cartoon character connecting Instagram plug"
     >
       <g className="anim-char-float">
-        {/* Left Cord & Plug (Instagram — Fae Bubblegum Pink) */}
         <path
           d="M10 110 C40 110, 55 85, 84 85"
           fill="none"
@@ -266,7 +234,6 @@ export function PlugMechanicCharacter({ connected = false }) {
         <line x1="110" y1="78" x2="122" y2="78" stroke="#19154E" strokeWidth="4" strokeLinecap="round" />
         <line x1="110" y1="92" x2="122" y2="92" stroke="#19154E" strokeWidth="4" strokeLinecap="round" />
 
-        {/* Right Socket & Cord (SocialAssist — Fae Lilac) */}
         <path
           d="M230 110 C200 110, 185 85, 156 85"
           fill="none"
@@ -285,7 +252,6 @@ export function PlugMechanicCharacter({ connected = false }) {
           strokeWidth="2.8"
         />
 
-        {/* Spark in Center */}
         <g className="anim-star" style={{ transformOrigin: '120px 44px' }}>
           <path
             d="M124 24 L112 44 L122 44 L116 60 L132 38 L121 38 Z"

@@ -28,6 +28,7 @@ import {
   PlugMechanicCharacter,
 } from './CartoonCharacters';
 import { INITIAL_AUTOMATIONS, INITIAL_ANALYTICS } from './fallbackEngine';
+import { supabase, isSuperuserEmail } from './supabase';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('automations'); // 'automations' | 'analytics' | 'strategy' | 'connect'
@@ -127,6 +128,32 @@ export default function App() {
 
   useEffect(() => {
     fetchAll();
+
+    // Check active Supabase session (from Google OAuth redirect or Supabase login)
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      const email = session?.user?.email;
+      if (email && isSuperuserEmail(email)) {
+        sessionStorage.setItem('sa_authenticated', 'true');
+        setIsAuthenticated(true);
+      }
+    });
+
+    const { data: authSub } = supabase.auth.onAuthStateChange((_event, session) => {
+      const email = session?.user?.email;
+      if (email) {
+        if (isSuperuserEmail(email)) {
+          sessionStorage.setItem('sa_authenticated', 'true');
+          setIsAuthenticated(true);
+          setLoginError('');
+        } else {
+          setLoginError(
+            `Signed in as ${email}, which is not authorized for @techfairyanna's private studio.`
+          );
+          supabase.auth.signOut();
+        }
+      }
+    });
+
     const handleOAuthMessage = (event) => {
       if (event.data && event.data.type === 'IG_OAUTH_SUCCESS') {
         showToast('Connected @techfairyanna via Instagram OAuth!');
@@ -134,7 +161,10 @@ export default function App() {
       }
     };
     window.addEventListener('message', handleOAuthMessage);
-    return () => window.removeEventListener('message', handleOAuthMessage);
+    return () => {
+      window.removeEventListener('message', handleOAuthMessage);
+      authSub?.subscription?.unsubscribe();
+    };
   }, []);
 
   const handleConnectSubmit = async (e) => {
@@ -419,10 +449,45 @@ export default function App() {
     setTimeout(() => setCopiedField(null), 2000);
   };
 
+  const handleGoogleSignIn = async () => {
+    setLoginError('');
+    const redirectUrl = window.location.href.split('#')[0];
+    const { error } = await supabase.auth.signInWithOAuth({
+      provider: 'google',
+      options: { redirectTo: redirectUrl },
+    });
+    if (error) {
+      setLoginError(error.message);
+    }
+  };
+
   const handleAdminLogin = async (e) => {
     e.preventDefault();
     setLoginError('');
-    const raw = `${loginUser.trim().toLowerCase()}:${loginPassword}`;
+    const userOrEmail = loginUser.trim().toLowerCase();
+
+    // 1. If the user entered an email address, authenticate via Supabase Auth first!
+    if (userOrEmail.includes('@')) {
+      if (!isSuperuserEmail(userOrEmail)) {
+        setLoginError('Only @techfairyanna superuser emails are permitted.');
+        return;
+      }
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: userOrEmail,
+        password: loginPassword,
+      });
+      if (!error && data?.user) {
+        sessionStorage.setItem('sa_authenticated', 'true');
+        setIsAuthenticated(true);
+        setLoginPassword('');
+        triggerFairyWand();
+        return;
+      }
+      // Also allow unlocking if they typed their superuser email + the studio master password
+    }
+
+    // 2. Verify SHA-256 Studio Password (works for handle 'techfairyanna' or superuser email)
+    const raw = `techfairyanna:${loginPassword}`;
     const msgBuffer = new TextEncoder().encode(raw);
     const hashBuffer = await crypto.subtle.digest('SHA-256', msgBuffer);
     const hashHex = Array.from(new Uint8Array(hashBuffer))
@@ -433,18 +498,22 @@ export default function App() {
       localStorage.getItem('sa_custom_pass_hash') ||
       'eb041c7ded7b3a19c0066954e0300257244c0c807c93e64a596d5808cda24172';
 
-    if (hashHex === expectedHash) {
+    const validIdentity =
+      userOrEmail === 'techfairyanna' || isSuperuserEmail(userOrEmail);
+
+    if (validIdentity && hashHex === expectedHash) {
       sessionStorage.setItem('sa_authenticated', 'true');
       setIsAuthenticated(true);
       setLoginPassword('');
       triggerFairyWand();
     } else {
-      setLoginError('Invalid studio credentials. Only @techfairyanna can unlock this studio.');
+      setLoginError('Invalid credentials. Sign in with Google, Supabase email, or studio password.');
     }
   };
 
-  const handleLockStudio = () => {
+  const handleLockStudio = async () => {
     sessionStorage.removeItem('sa_authenticated');
+    await supabase.auth.signOut().catch(() => {});
     setIsAuthenticated(false);
   };
 
@@ -453,7 +522,7 @@ export default function App() {
       <div className="min-h-screen bg-[#FFF8FC] text-[#19154E] flex items-center justify-center p-4">
         <div className="editorial-card max-w-md w-full p-7 sm:p-8 bg-white space-y-5 panel-enter">
           <div className="flex flex-col items-center text-center space-y-2">
-            <div className="w-36 h-36">
+            <div className="w-40 h-40">
               <TechFairyCharacter isCasting={false} />
             </div>
             <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#FFE4F1] border-2 border-[#19154E] text-xs font-bold">
@@ -464,7 +533,7 @@ export default function App() {
               SocialAssist Login
             </h1>
             <p className="text-xs text-neutral-600 font-medium">
-              Protected workspace for <strong>@techfairyanna</strong>. Enter your studio password to unlock.
+              Protected workspace for <strong>@techfairyanna</strong>. Sign in with Google, Supabase Auth, or your studio password.
             </p>
           </div>
 
@@ -474,14 +543,50 @@ export default function App() {
             </div>
           )}
 
-          <form onSubmit={handleAdminLogin} className="space-y-4">
+          {/* 1-Click Google Sign-In via Supabase OAuth */}
+          <button
+            type="button"
+            onClick={handleGoogleSignIn}
+            className="w-full editorial-btn py-3 px-4 rounded-2xl bg-white hover:bg-[#FFF8FC] text-[#19154E] font-display font-bold text-sm flex items-center justify-center gap-3"
+          >
+            <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                fill="#4285F4"
+                d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.17z"
+              />
+              <path
+                fill="#34A853"
+                d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.11-6.72-4.96H1.29v3.14C3.26 21.3 7.31 24 12 24z"
+              />
+              <path
+                fill="#FBBC05"
+                d="M5.28 14.24c-.24-.72-.38-1.49-.38-2.24s.14-1.52.38-2.24V6.62H1.29C.47 8.24 0 10.06 0 12s.47 3.76 1.29 5.38l3.99-3.14z"
+              />
+              <path
+                fill="#EA4335"
+                d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.31 0 3.26 2.7 1.29 6.62l3.99 3.14c.95-2.85 3.6-4.96 6.72-4.96z"
+              />
+            </svg>
+            <span>Continue with Google</span>
+          </button>
+
+          <div className="relative flex py-1 items-center">
+            <div className="flex-grow border-t-2 border-dashed border-neutral-300" />
+            <span className="flex-shrink mx-3 text-[11px] font-bold uppercase tracking-wider text-neutral-500">
+              or Supabase Email / Studio Key
+            </span>
+            <div className="flex-grow border-t-2 border-dashed border-neutral-300" />
+          </div>
+
+          <form onSubmit={handleAdminLogin} className="space-y-3.5">
             <div>
               <label className="block text-xs font-bold text-[#19154E] mb-1">
-                Creator Handle
+                Supabase Email or Handle
               </label>
               <input
                 type="text"
                 required
+                placeholder="techfairyanna@gmail.com or techfairyanna"
                 value={loginUser}
                 onChange={(e) => setLoginUser(e.target.value)}
                 className="w-full px-3.5 py-2.5 rounded-xl bg-[#FFF8FC] border-2 border-[#19154E] text-sm font-bold focus:outline-none focus:bg-white"
@@ -490,12 +595,11 @@ export default function App() {
 
             <div>
               <label className="block text-xs font-bold text-[#19154E] mb-1">
-                Studio Password
+                Password
               </label>
               <input
                 type="password"
                 required
-                autoFocus
                 placeholder="••••••••••••"
                 value={loginPassword}
                 onChange={(e) => setLoginPassword(e.target.value)}
