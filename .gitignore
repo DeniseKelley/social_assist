@@ -1,0 +1,19 @@
+# Python
+backend/venv/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Node
+frontend/node_modules/
+frontend/dist/
+.npm
+
+# Secrets & local runtime data
+.env
+backend/.env
+backend/data/config.json
+
+# OS / Editor
+.DS_Store
+*.log
