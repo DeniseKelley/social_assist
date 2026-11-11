@@ -584,11 +584,22 @@ def compute_strategies_from_posts(profile: Dict[str, Any], posts: List[Dict[str,
 # ---------------------------------------------------------------------------
 
 class ConnectTokenRequest(BaseModel):
-    instagram_handle: str = "techfairyanna"
+    instagram_handle: str = "https://www.instagram.com/techfairyanna/"
     access_token: Optional[str] = None
     app_id: Optional[str] = None
     app_secret: Optional[str] = None
     redirect_uri: Optional[str] = None
+
+
+def extract_handle_from_input(raw: str) -> str:
+    """Extracts the Instagram username from a pasted profile link or @handle."""
+    s = (raw or "").strip()
+    if "instagram.com/" in s:
+        part = s.split("instagram.com/", 1)[1].split("?")[0].strip("/")
+        handle = part.split("/")[0].lstrip("@")
+        if handle and handle not in ("p", "reel", "reels", "stories", "explore", "accounts"):
+            return handle
+    return s.lstrip("@").strip("/") or "techfairyanna"
 
 
 class AutomationCreateRequest(BaseModel):
@@ -656,7 +667,7 @@ async def connect_instagram(req: ConnectTokenRequest):
     3) Quick-connecting by @username (`techfairyanna`) to pull public/cached analytics immediately
     """
     cfg = get_config()
-    cfg["instagram_handle"] = req.instagram_handle.strip().lstrip("@") or "techfairyanna"
+    cfg["instagram_handle"] = extract_handle_from_input(req.instagram_handle)
 
     if req.app_id is not None:
         cfg["app_id"] = req.app_id.strip()

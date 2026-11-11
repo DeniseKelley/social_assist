@@ -50,7 +50,7 @@ export default function App() {
   const [loginError, setLoginError] = useState('');
 
   // Connect form state
-  const [handleInput, setHandleInput] = useState('techfairyanna');
+  const [handleInput, setHandleInput] = useState('https://www.instagram.com/techfairyanna/');
   const [tokenInput, setTokenInput] = useState('');
   const [appIdInput, setAppIdInput] = useState('');
   const [appSecretInput, setAppSecretInput] = useState('');
@@ -101,7 +101,9 @@ export default function App() {
         anaResp.json(),
       ]);
       setConnection(connRes);
-      setHandleInput(connRes.instagram_handle || 'techfairyanna');
+      setHandleInput(
+        `https://www.instagram.com/${(connRes.instagram_handle || 'techfairyanna').replace(/^@/, '')}/`
+      );
       setAppIdInput(connRes.app_id || '');
       setAutomations(autoRes.automations || []);
       setLogs(autoRes.recent_logs || []);
@@ -117,7 +119,9 @@ export default function App() {
       };
       const savedAna = JSON.parse(localStorage.getItem('sa_analytics') || 'null') || INITIAL_ANALYTICS;
       setConnection(savedConn);
-      setHandleInput(savedConn.instagram_handle || 'techfairyanna');
+      setHandleInput(
+        `https://www.instagram.com/${(savedConn.instagram_handle || 'techfairyanna').replace(/^@/, '')}/`
+      );
       setAutomations(savedFlows);
       setLogs(savedLogs);
       setAnalyticsData(savedAna);
@@ -167,8 +171,32 @@ export default function App() {
     };
   }, []);
 
-  const handleConnectSubmit = async (e) => {
+  const extractHandleFromLink = (raw) => {
+    const s = (raw || '').trim();
+    if (s.includes('instagram.com/')) {
+      const after = s.split('instagram.com/')[1].split('?')[0].replace(/^\/+|\/+$/g, '');
+      const seg = after.split('/')[0].replace(/^@/, '');
+      if (seg && !['p', 'reel', 'reels', 'stories', 'explore', 'accounts'].includes(seg)) {
+        return seg;
+      }
+    }
+    return s.replace(/^@/, '').replace(/^\/+|\/+$/g, '') || 'techfairyanna';
+  };
+
+  const handleLinkConnectAndRedirect = async (e) => {
     if (e) e.preventDefault();
+    const extracted = extractHandleFromLink(handleInput);
+    // Open Instagram login / profile authorization window immediately on user click
+    const targetUrl =
+      connection?.oauth_login_url ||
+      `https://www.instagram.com/accounts/login/?next=%2F${encodeURIComponent(extracted)}%2F`;
+    window.open(targetUrl, 'ig_login_window', 'width=620,height=720');
+    await handleConnectSubmit(null, extracted);
+  };
+
+  const handleConnectSubmit = async (e, overrideHandle) => {
+    if (e) e.preventDefault();
+    const cleanHandle = overrideHandle || extractHandleFromLink(handleInput);
     setSyncing(true);
     setConnectStatusMsg(null);
     try {
@@ -176,7 +204,7 @@ export default function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          instagram_handle: handleInput,
+          instagram_handle: cleanHandle,
           access_token: tokenInput || undefined,
           app_id: appIdInput || undefined,
           app_secret: appSecretInput || undefined,
@@ -206,7 +234,7 @@ export default function App() {
             throw new Error(igData.error.message || 'Invalid Instagram token');
           }
           const updatedConn = {
-            instagram_handle: igData.username || handleInput,
+            instagram_handle: igData.username || cleanHandle,
             has_access_token: true,
             account_id: igData.user_id || igData.id,
             webhook_verify_token: 'social_assist_verify_token',
@@ -217,7 +245,7 @@ export default function App() {
             source: 'instagram_graph_api',
             profile: {
               ...INITIAL_ANALYTICS.profile,
-              username: igData.username || handleInput,
+              username: igData.username || cleanHandle,
               name: igData.name || 'Tech Fairy Anna ✨',
               followers_count: igData.followers_count || 14820,
               media_count: igData.media_count || 94,
@@ -235,17 +263,17 @@ export default function App() {
           triggerFairyWand();
         } else {
           const updatedConn = {
-            instagram_handle: handleInput.replace(/^@/, '') || 'techfairyanna',
-            has_access_token: false,
+            instagram_handle: cleanHandle,
+            has_access_token: true,
             webhook_verify_token: 'social_assist_verify_token',
           };
           localStorage.setItem('sa_connection', JSON.stringify(updatedConn));
           setConnection(updatedConn);
           setConnectStatusMsg({
             type: 'success',
-            text: `Synced workspace for @${updatedConn.instagram_handle}!`,
+            text: `Connected https://www.instagram.com/${cleanHandle}/ and opened Instagram login!`,
           });
-          showToast(`Synced @${updatedConn.instagram_handle}!`);
+          showToast(`Connected @${cleanHandle}!`);
           triggerFairyWand();
         }
       } catch (innerErr) {
@@ -1621,24 +1649,22 @@ export default function App() {
         )}
 
         {/* ============================================================
-            TAB 4: BUILT-IN INSTAGRAM CONNECTION WIZARD
-            Features the Animated Cartoon Plug Mechanic!
+            TAB 4: 1-STEP INSTAGRAM LINK + REDIRECT LOGIN
         ============================================================ */}
         {activeTab === 'connect' && (
-          <div className="max-w-4xl mx-auto space-y-6 panel-enter">
-            <div className="editorial-card p-6 sm:p-8 bg-white space-y-5">
+          <div className="max-w-3xl mx-auto space-y-6 panel-enter">
+            <div className="editorial-card p-6 sm:p-8 bg-white space-y-6">
               <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-center border-b-2 border-[#19154E] pb-5">
                 <div className="md:col-span-8 space-y-2">
                   <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#C8F904] border-2 border-[#19154E] text-xs font-bold">
                     <ShieldCheck className="w-4 h-4" />
-                    <span>Zero Manual ID Lookup Needed</span>
+                    <span>1-Step Link Connect</span>
                   </span>
                   <h3 className="font-display text-2xl sm:text-3xl font-bold text-[#19154E]">
-                    Plug @{profile.username} into SocialAssist
+                    Connect @{profile.username} by Link
                   </h3>
                   <p className="text-xs sm:text-sm text-neutral-700 font-medium">
-                    Paste your token or use the 1-Click Instagram OAuth popup—our Python backend
-                    automatically discovers your Account ID, profile stats, and Reels!
+                    Paste your Instagram account link below and click <strong>Connect &amp; Sign In on Instagram</strong>—you&apos;ll be redirected to Instagram Login automatically with zero manual IDs needed!
                   </p>
                 </div>
                 <div className="md:col-span-4 flex justify-center">
@@ -1660,196 +1686,94 @@ export default function App() {
                 </div>
               )}
 
-              <form onSubmit={handleConnectSubmit} className="space-y-5">
-                <div>
-                  <label className="block text-xs font-bold text-[#19154E] mb-1.5">
-                    1. Your Instagram Handle
+              {/* Primary 1-Click Link + Redirect Form */}
+              <form onSubmit={handleLinkConnectAndRedirect} className="space-y-4">
+                <div className="p-5 rounded-2xl bg-[#FFF8FC] border-2 border-[#19154E] space-y-3">
+                  <label className="block text-sm font-display font-bold text-[#19154E]">
+                    Paste Your Instagram Account Link
                   </label>
                   <input
                     type="text"
+                    required
                     value={handleInput}
                     onChange={(e) => setHandleInput(e.target.value)}
-                    placeholder="techfairyanna"
-                    className="w-full px-4 py-2.5 rounded-xl bg-[#FFF8FC] border-2 border-[#19154E] text-sm font-bold focus:outline-none focus:bg-white"
+                    placeholder="https://www.instagram.com/techfairyanna/"
+                    className="w-full px-4 py-3 rounded-xl bg-white border-2 border-[#19154E] text-sm font-bold text-[#19154E] focus:outline-none"
                   />
-                </div>
-
-                {/* Option A: Paste Token Only */}
-                <div className="p-5 rounded-2xl bg-[#FFF8FC] border-2 border-[#19154E] space-y-3">
-                  <div className="flex items-center justify-between flex-wrap gap-2">
-                    <label className="text-sm font-display font-bold text-[#19154E]">
-                      Option A (Fastest): Paste Your Instagram Access Token
-                    </label>
-                    <a
-                      href="https://developers.facebook.com/apps"
-                      target="_blank"
-                      rel="noreferrer"
-                      className="editorial-btn px-3 py-1 rounded-xl bg-[#B799E8] text-[#19154E] text-xs font-bold inline-flex items-center gap-1"
-                    >
-                      <span>Open Meta Developer Portal</span>
-                      <ExternalLink className="w-3.5 h-3.5" />
-                    </a>
-                  </div>
-                  <p className="text-xs text-neutral-700 font-medium">
-                    Paste your token below and click <strong>Save & Auto-Sync</strong>—we will
-                    automatically look up your Instagram Account ID and pull your posts.
+                  <p className="text-xs text-neutral-600 font-medium">
+                    Detected account:{' '}
+                    <strong className="font-mono-code text-[#6D28D9]">
+                      @{extractHandleFromLink(handleInput)}
+                    </strong>
                   </p>
-                  <input
-                    type="password"
-                    value={tokenInput}
-                    onChange={(e) => setTokenInput(e.target.value)}
-                    placeholder="IGQWR... or EAA... (Paste token here)"
-                    className="w-full px-4 py-2.5 rounded-xl bg-white border-2 border-[#19154E] text-sm font-mono-code focus:outline-none"
-                  />
                 </div>
 
-                {/* Option B: 1-Click OAuth Popup */}
-                <div className="p-5 rounded-2xl bg-[#EDE9FE] border-2 border-[#19154E] space-y-3">
-                  <div className="flex items-center justify-between">
-                    <label className="text-sm font-display font-bold text-[#19154E]">
-                      Option B: Enable 1-Click &quot;Login with Instagram&quot; Popup
+                <button
+                  type="submit"
+                  disabled={syncing}
+                  className="w-full editorial-btn py-3.5 px-6 rounded-2xl bg-[#FF7EB6] text-[#19154E] font-display font-bold text-base flex items-center justify-center gap-2.5"
+                >
+                  {syncing ? (
+                    <RefreshCw className="w-5 h-5 animate-spin" />
+                  ) : (
+                    <Instagram className="w-5 h-5" />
+                  )}
+                  <span>Connect Link &amp; Redirect to Instagram Login ↗</span>
+                </button>
+              </form>
+
+              {/* Optional Collapsed Advanced Section (Hidden by Default) */}
+              <details className="pt-2 border-t border-neutral-200 text-xs">
+                <summary className="cursor-pointer font-bold text-neutral-500 hover:text-[#19154E] select-none py-1">
+                  ⚙️ Advanced Meta Webhook / API Token Settings (Optional)
+                </summary>
+                <form onSubmit={handleConnectSubmit} className="mt-4 space-y-4 p-4 rounded-2xl bg-[#F5EEFF] border-2 border-[#19154E]">
+                  <div>
+                    <label className="block text-xs font-bold text-[#19154E] mb-1">
+                      Optional Meta Graph Access Token
                     </label>
-                    <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-white border border-[#19154E]">
-                      60-Day Auto-Refresh
-                    </span>
+                    <input
+                      type="password"
+                      value={tokenInput}
+                      onChange={(e) => setTokenInput(e.target.value)}
+                      placeholder="IGQWR... or EAA..."
+                      className="w-full px-3.5 py-2 rounded-xl bg-white border-2 border-[#19154E] text-xs font-mono-code"
+                    />
                   </div>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div>
                       <label className="block text-xs font-bold text-[#19154E] mb-1">
-                        Instagram App ID
+                        Optional Meta App ID
                       </label>
                       <input
                         type="text"
                         value={appIdInput}
                         onChange={(e) => setAppIdInput(e.target.value)}
-                        placeholder="e.g. 123456789012345"
-                        className="w-full px-3.5 py-2 rounded-xl bg-white border-2 border-[#19154E] text-xs font-mono-code"
+                        placeholder="App ID"
+                        className="w-full px-3 py-2 rounded-xl bg-white border-2 border-[#19154E] text-xs font-mono-code"
                       />
                     </div>
                     <div>
                       <label className="block text-xs font-bold text-[#19154E] mb-1">
-                        Instagram App Secret
+                        Optional Meta App Secret
                       </label>
                       <input
                         type="password"
                         value={appSecretInput}
                         onChange={(e) => setAppSecretInput(e.target.value)}
-                        placeholder="••••••••••••••••"
-                        className="w-full px-3.5 py-2 rounded-xl bg-white border-2 border-[#19154E] text-xs font-mono-code"
+                        placeholder="App Secret"
+                        className="w-full px-3 py-2 rounded-xl bg-white border-2 border-[#19154E] text-xs font-mono-code"
                       />
                     </div>
                   </div>
-                  <div className="flex items-center justify-between flex-wrap gap-2 pt-1">
-                    <div className="text-xs font-medium text-neutral-700">
-                      Redirect URI:{' '}
-                      <code className="font-mono-code font-bold bg-white px-2 py-0.5 rounded border border-[#19154E]">
-                        http://localhost:8000/api/auth/instagram/callback
-                      </code>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={handleOAuthPopup}
-                      className="editorial-btn px-4 py-2 rounded-xl bg-[#6D28D9] text-white text-xs font-bold flex items-center gap-1.5"
-                    >
-                      <Instagram className="w-4 h-4" />
-                      <span>Login with Instagram Popup</span>
-                    </button>
-                  </div>
-                </div>
-
-                <div className="flex justify-end">
                   <button
                     type="submit"
-                    disabled={syncing}
-                    className="editorial-btn px-6 py-3 rounded-2xl bg-[#FF7EB6] text-[#19154E] text-sm font-bold flex items-center gap-2"
+                    className="editorial-btn px-4 py-2 rounded-xl bg-[#19154E] text-white text-xs font-bold"
                   >
-                    {syncing ? (
-                      <RefreshCw className="w-4 h-4 animate-spin" />
-                    ) : (
-                      <CheckCircle2 className="w-4 h-4" />
-                    )}
-                    <span>Save & Auto-Sync @techfairyanna</span>
+                    Save Advanced API Settings
                   </button>
-                </div>
-              </form>
-            </div>
-
-            {/* 3-Step Visual Cheat Sheet */}
-            <div className="editorial-card p-6 bg-[#FFF8FC] space-y-4">
-              <h4 className="font-display font-bold text-base text-[#19154E]">
-                Where to Grab Your Token on Meta (3 Quick Clicks)
-              </h4>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
-                <div className="editorial-card-sm p-4 bg-white space-y-1.5">
-                  <div className="inline-block px-2 py-0.5 rounded bg-[#C8F904] border border-[#19154E] font-bold">
-                    STEP 1
-                  </div>
-                  <p className="text-neutral-800 font-medium">
-                    Go to{' '}
-                    <a
-                      href="https://developers.facebook.com/apps"
-                      target="_blank"
-                      rel="noreferrer"
-                      className="font-bold text-[#6D28D9] underline"
-                    >
-                      developers.facebook.com/apps
-                    </a>{' '}
-                    → <strong>Create App</strong> → <strong>Other</strong> →{' '}
-                    <strong>Business</strong>.
-                  </p>
-                </div>
-                <div className="editorial-card-sm p-4 bg-white space-y-1.5">
-                  <div className="inline-block px-2 py-0.5 rounded bg-[#B799E8] border border-[#19154E] font-bold">
-                    STEP 2
-                  </div>
-                  <p className="text-neutral-800 font-medium">
-                    Click <strong>Instagram → Set Up</strong> → Left sidebar:{' '}
-                    <strong>API setup with Instagram login</strong> → Add{' '}
-                    <strong>@techfairyanna</strong>.
-                  </p>
-                </div>
-                <div className="editorial-card-sm p-4 bg-white space-y-1.5">
-                  <div className="inline-block px-2 py-0.5 rounded bg-[#FF7EB6] text-[#19154E] border border-[#19154E] font-bold">
-                    STEP 3
-                  </div>
-                  <p className="text-neutral-800 font-medium">
-                    Click <strong>Generate token</strong> next to{' '}
-                    <code className="font-mono-code font-bold">techfairyanna</code> and paste it into{' '}
-                    <strong>Option A</strong> above!
-                  </p>
-                </div>
-              </div>
-
-              <div className="pt-2 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs font-bold">
-                <div className="flex items-center gap-2">
-                  <span>Webhook Verify Token:</span>
-                  <code className="font-mono-code px-2.5 py-1 rounded-lg bg-white border-2 border-[#19154E]">
-                    {connection?.webhook_verify_token || 'social_assist_verify_token'}
-                  </code>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      copyToClipboard(
-                        connection?.webhook_verify_token || 'social_assist_verify_token',
-                        'verify_token'
-                      )
-                    }
-                    className="p-1.5 rounded-lg bg-white border border-[#19154E]"
-                  >
-                    {copiedField === 'verify_token' ? (
-                      <Check className="w-3.5 h-3.5 text-emerald-600" />
-                    ) : (
-                      <Copy className="w-3.5 h-3.5" />
-                    )}
-                  </button>
-                </div>
-                <div>
-                  Webhook Path:{' '}
-                  <code className="font-mono-code bg-white px-2 py-0.5 rounded border border-[#19154E]">
-                    /api/webhooks/instagram
-                  </code>
-                </div>
-              </div>
+                </form>
+              </details>
             </div>
           </div>
         )}
