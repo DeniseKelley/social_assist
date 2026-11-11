@@ -1,17 +1,18 @@
 import React, { useState, useEffect } from 'react';
 
 /**
- * 1. TechFairyCharacter ("Fairy Anna" — Animated Cartoon Fae Sticker)
- * Pure animated Fae character (zero background clutter behind the sticker!):
- * - Natural periodic blinking using hand-matched 4x supersampled frames (fae_cute_sticker.png -> fae_cute_blink.png)
- * - Happy talking/laughing expression (fae_cute_talk.png) when clicked or when sending a DM
- * - Independent head-tilt, squash-and-stretch bounce, and floating speech bubble
+ * 1. TechFairyCharacter ("Fairy Anna" — Animated Cartoon Fae in Lilac Window)
+ * Uses /mnt/d/annayoutubefiles/Fae/fae_window.PNG with 4x supersampled LANCZOS frames:
+ * - fae_window_base.png: Base frame leaning in the lilac arched window holding her star wand
+ * - fae_window_blink.png: Natural periodic blinking frame
+ * - fae_window_sparkle.png: Twinkling star wand glow frame
+ * - fae_window_talk.png: Happy talking expression + glowing wand when clicked or casting a DM
  */
 export function TechFairyCharacter({ isCasting = false }) {
-  const [frame, setFrame] = useState('open'); // 'open' | 'blink' | 'talk'
+  const [frame, setFrame] = useState('open'); // 'open' | 'blink' | 'sparkle' | 'talk'
   const [isBouncing, setIsBouncing] = useState(false);
 
-  // Natural periodic eye blinking loop
+  // Natural periodic eye blinking & wand twinkling loop
   useEffect(() => {
     if (isCasting) {
       setFrame('talk');
@@ -19,21 +20,32 @@ export function TechFairyCharacter({ isCasting = false }) {
       const t = setTimeout(() => {
         setFrame('open');
         setIsBouncing(false);
-      }, 900);
+      }, 950);
       return () => clearTimeout(t);
     }
 
-    let blinkTimeout;
+    let step = 0;
+    let subTimeout;
     const interval = setInterval(() => {
-      setFrame('blink');
-      blinkTimeout = setTimeout(() => {
-        setFrame('open');
-      }, 170);
-    }, 3400);
+      step = (step + 1) % 3;
+      if (step === 1) {
+        // Blink eyes
+        setFrame('blink');
+        subTimeout = setTimeout(() => setFrame('open'), 175);
+      } else if (step === 2) {
+        // Twinkle star wand
+        setFrame('sparkle');
+        subTimeout = setTimeout(() => setFrame('open'), 550);
+      } else {
+        // Double blink + brief talk smile
+        setFrame('blink');
+        subTimeout = setTimeout(() => setFrame('open'), 160);
+      }
+    }, 2400);
 
     return () => {
       clearInterval(interval);
-      clearTimeout(blinkTimeout);
+      clearTimeout(subTimeout);
     };
   }, [isCasting]);
 
@@ -45,48 +57,51 @@ export function TechFairyCharacter({ isCasting = false }) {
       setTimeout(() => {
         setFrame('open');
         setIsBouncing(false);
-      }, 140);
-    }, 650);
+      }, 150);
+    }, 700);
   };
 
   const currentSrc =
     frame === 'blink'
-      ? './fae_cute_blink.png'
+      ? './fae_window_blink.png'
       : frame === 'talk'
-      ? './fae_cute_talk.png'
-      : './fae_cute_sticker.png';
+      ? './fae_window_talk.png'
+      : frame === 'sparkle'
+      ? './fae_window_sparkle.png'
+      : './fae_window_base.png';
 
   return (
     <div
       onClick={handleManualPoke}
       className="relative w-full h-full flex items-center justify-center select-none cursor-pointer group"
-      aria-label="Animated Fae cartoon character"
+      aria-label="Animated Fae in Window cartoon character"
     >
       {/* Cute Speech Bubble when talking / sending DM */}
       {(frame === 'talk' || isCasting) && (
-        <div className="absolute -top-3 right-0 z-20 px-3 py-1 rounded-2xl bg-[#FF7EB6] text-[#19154E] border-2 border-[#19154E] shadow-[3px_3px_0px_#19154E] text-xs font-display font-bold panel-enter">
-          Sent DM! 💌✨
+        <div className="absolute -top-2 right-0 z-20 px-3 py-1 rounded-2xl bg-[#FF7EB6] text-[#19154E] border-2 border-[#19154E] shadow-[3px_3px_0px_#19154E] text-xs font-display font-bold panel-enter">
+          Magic Sent! 🪄✨
         </div>
       )}
 
       {/* Preload frames so transitions are instant with zero flicker */}
       <div className="hidden" aria-hidden="true">
-        <img src="./fae_cute_sticker.png" alt="" />
-        <img src="./fae_cute_blink.png" alt="" />
-        <img src="./fae_cute_talk.png" alt="" />
+        <img src="./fae_window_base.png" alt="" />
+        <img src="./fae_window_blink.png" alt="" />
+        <img src="./fae_window_sparkle.png" alt="" />
+        <img src="./fae_window_talk.png" alt="" />
       </div>
 
-      {/* Animated Cartoon Fae Character (Head tilt + bounce + blinking/talking frames) */}
+      {/* Animated Cartoon Fae in Window (gentle breathing sway + bounce + blinking/talking/wand-sparkle frames) */}
       <div
-        className={`relative w-44 h-44 sm:w-52 sm:h-52 flex items-center justify-center ${
-          isBouncing ? 'anim-char-wand-active' : 'anim-char-head'
+        className={`relative w-52 h-52 sm:w-64 sm:h-64 flex items-center justify-center ${
+          isBouncing ? 'anim-char-wand-active' : 'anim-char-float'
         }`}
-        style={{ transformOrigin: '50% 82%' }}
+        style={{ transformOrigin: '50% 75%' }}
       >
         <img
           src={currentSrc}
-          alt="Animated Fae Character"
-          className="w-full h-full object-contain drop-shadow-[0_8px_16px_rgba(25,21,78,0.14)] transition-transform duration-150"
+          alt="Animated Fae in Window"
+          className="w-full h-full object-contain drop-shadow-[0_10px_18px_rgba(25,21,78,0.14)] transition-transform duration-150"
         />
       </div>
     </div>

@@ -605,7 +605,7 @@ export default function App() {
       <div className="min-h-screen bg-[#FFF8FC] text-[#19154E] flex items-center justify-center p-4">
         <div className="editorial-card max-w-md w-full p-7 sm:p-8 bg-white space-y-5 panel-enter">
           <div className="flex flex-col items-center text-center space-y-2">
-            <div className="w-40 h-40">
+            <div className="w-48 h-48">
               <TechFairyCharacter isCasting={false} />
             </div>
             <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#FFE4F1] border-2 border-[#19154E] text-xs font-bold">
@@ -953,7 +953,7 @@ export default function App() {
               <div
                 onClick={triggerFairyWand}
                 title="Click Fairy Anna to cast a DM spell!"
-                className="w-56 h-48 sm:w-64 sm:h-52 cursor-pointer"
+                className="w-60 h-60 sm:w-64 sm:h-64 cursor-pointer"
               >
                 <TechFairyCharacter
                   isCasting={isCastingWand}
