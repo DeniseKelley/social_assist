@@ -80,16 +80,16 @@ export default function App() {
   const [simResult, setSimResult] = useState(null);
 
   // Video Performance Ranking & OpenClaw Agent Hookup state
-  const [videoSortBy, setVideoSortBy] = useState('followers'); // 'followers' | 'views' | 'conversion'
+  const [videoSortBy, setVideoSortBy] = useState('views'); // 'views' | 'likes' | 'comments' | 'engagement' | 'recent' | 'followers'
   const [openclawGatewayUrl, setOpenclawGatewayUrl] = useState(
     'http://localhost:18789/v1/chat/completions'
   );
   const [openclawPrompt, setOpenclawPrompt] = useState(
-    'Analyze my top-performing videos by Views and Followers Gained, break down the exact patterns in their text summaries, and write 3 new high-converting Reel scripts optimized for my US audience active window.'
+    'Analyze my top-performing live Reels by Views, Likes, and Engagement Rate, break down the exact patterns in their text summaries, and write 3 new high-converting Reel scripts optimized for my US audience active window.'
   );
   const [openclawOutput, setOpenclawOutput] = useState(() =>
     runLocalOpenClawAnalysis(
-      'Analyze my top-performing videos by Views and Followers Gained, break down the exact patterns in their text summaries, and write 3 new high-converting Reel scripts optimized for my US audience active window.',
+      'Analyze my top-performing live Reels by Views, Likes, and Engagement Rate, break down the exact patterns in their text summaries, and write 3 new high-converting Reel scripts optimized for my US audience active window.',
       INITIAL_ANALYTICS
     )
   );
@@ -128,7 +128,7 @@ export default function App() {
         setOpenclawStatus(
           data.status === 'connected_openclaw_gateway' ? 'connected_gateway' : 'builtin_agent'
         );
-        showToast('OpenClaw Agent finished analyzing your video summaries!');
+        showToast('OpenClaw Agent finished analyzing your live video stats!');
         return;
       }
       throw new Error('Fallback to local OpenClaw analyzer');
@@ -136,53 +136,88 @@ export default function App() {
       const fallbackText = runLocalOpenClawAnalysis(promptToUse, analyticsData || INITIAL_ANALYTICS);
       setOpenclawOutput(fallbackText);
       setOpenclawStatus('builtin_agent');
-      showToast('OpenClaw Agent finished analyzing your video summaries!');
+      showToast('OpenClaw Agent finished analyzing your live video stats!');
     }
   };
 
+  const fetchLiveInstagramAnalytics = async ({ forceRefresh = false, overrideHandle = '' } = {}) => {
+    const savedConn = JSON.parse(localStorage.getItem('sa_connection') || 'null');
+    const savedToken = localStorage.getItem('sa_ig_access_token') || '';
+    const targetHandle = (
+      overrideHandle ||
+      savedConn?.instagram_handle ||
+      'techfairyanna'
+    ).replace(/^@/, '');
+
+    const headers = {};
+    if (savedToken) {
+      headers.Authorization = `Bearer ${savedToken}`;
+    }
+
+    const qs = new URLSearchParams({ handle: targetHandle });
+    if (forceRefresh) {
+      qs.set('refresh', 'true');
+    }
+
+    const anaResp = await fetch(`/api/analytics?${qs.toString()}`, {
+      headers,
+      cache: forceRefresh ? 'no-store' : 'default',
+    });
+    if (!anaResp.ok) {
+      throw new Error(`Analytics endpoint returned HTTP ${anaResp.status}`);
+    }
+    const anaRes = await anaResp.json();
+    setAnalyticsData(anaRes);
+    setOpenclawOutput((prev) =>
+      openclawStatus === 'ready' ? runLocalOpenClawAnalysis(openclawPrompt, anaRes) : prev
+    );
+    return anaRes;
+  };
+
   const fetchAll = async () => {
+    // Purge legacy static cache keys so stale hardcoded snapshots never persist
+    localStorage.removeItem('sa_analytics');
+    localStorage.removeItem('sa_analytics_v4_real');
+    localStorage.removeItem('sa_analytics_v5_live');
+
+    // 1. Load Connection + Automations (FastAPI backend if running locally, otherwise localStorage)
+    let resolvedHandle = 'techfairyanna';
     try {
-      const [connResp, autoResp, anaResp] = await Promise.all([
+      const [connResp, autoResp] = await Promise.all([
         fetch('/api/connection'),
         fetch('/api/automations'),
-        fetch('/api/analytics'),
       ]);
-      if (!connResp.ok || !autoResp.ok || !anaResp.ok) {
-        throw new Error('Static host mode');
+      if (!connResp.ok || !autoResp.ok) {
+        throw new Error('Serverless / static automation store');
       }
-      const [connRes, autoRes, anaRes] = await Promise.all([
-        connResp.json(),
-        autoResp.json(),
-        anaResp.json(),
-      ]);
+      const [connRes, autoRes] = await Promise.all([connResp.json(), autoResp.json()]);
+      resolvedHandle = (connRes.instagram_handle || 'techfairyanna').replace(/^@/, '');
       setConnection(connRes);
-      setHandleInput(
-        `https://www.instagram.com/${(connRes.instagram_handle || 'techfairyanna').replace(/^@/, '')}/`
-      );
+      setHandleInput(`https://www.instagram.com/${resolvedHandle}/`);
       setAppIdInput(connRes.app_id || '');
       setAutomations(autoRes.automations || []);
       setLogs(autoRes.recent_logs || []);
-      setAnalyticsData(anaRes);
     } catch {
-      // Standalone static page mode (inside techfairylab website)
-      localStorage.removeItem('sa_analytics');
-      const savedFlows = JSON.parse(localStorage.getItem('sa_automations') || 'null') || INITIAL_AUTOMATIONS;
+      const savedFlows =
+        JSON.parse(localStorage.getItem('sa_automations') || 'null') || INITIAL_AUTOMATIONS;
       const savedLogs = JSON.parse(localStorage.getItem('sa_logs') || '[]');
       const savedConn = JSON.parse(localStorage.getItem('sa_connection') || 'null') || {
         instagram_handle: 'techfairyanna',
-        has_access_token: false,
+        has_access_token: Boolean(localStorage.getItem('sa_ig_access_token')),
         webhook_verify_token: 'social_assist_verify_token',
       };
-      const cachedAna = JSON.parse(localStorage.getItem('sa_analytics_v4_real') || 'null');
-      const hasRealVideos = cachedAna?.posts?.some((p) => p.id === 'reel_sudo_rm');
-      const savedAna = hasRealVideos ? cachedAna : INITIAL_ANALYTICS;
+      resolvedHandle = (savedConn.instagram_handle || 'techfairyanna').replace(/^@/, '');
       setConnection(savedConn);
-      setHandleInput(
-        `https://www.instagram.com/${(savedConn.instagram_handle || 'techfairyanna').replace(/^@/, '')}/`
-      );
+      setHandleInput(`https://www.instagram.com/${resolvedHandle}/`);
       setAutomations(savedFlows);
       setLogs(savedLogs);
-      setAnalyticsData(savedAna);
+    }
+
+    // 2. Always fetch live Instagram stats independently from `/api/analytics`
+    try {
+      await fetchLiveInstagramAnalytics({ forceRefresh: false, overrideHandle: resolvedHandle });
+    } catch {
+      setAnalyticsData((prev) => prev || INITIAL_ANALYTICS);
     } finally {
       setLoading(false);
     }
@@ -190,6 +225,13 @@ export default function App() {
 
   useEffect(() => {
     fetchAll();
+
+    // Auto-refresh live Instagram numbers every 90 seconds while the tab is visible
+    const livePollTimer = setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        fetchLiveInstagramAnalytics({ forceRefresh: true }).catch(() => {});
+      }
+    }, 90000);
 
     // Check active Supabase session (from Google OAuth redirect or Supabase login)
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -224,6 +266,7 @@ export default function App() {
     };
     window.addEventListener('message', handleOAuthMessage);
     return () => {
+      clearInterval(livePollTimer);
       window.removeEventListener('message', handleOAuthMessage);
       authSub?.subscription?.unsubscribe();
     };
@@ -277,61 +320,56 @@ export default function App() {
         await fetchAll();
         return;
       }
-      throw new Error('Fallback to browser Graph API');
+      throw new Error('Serverless mode connect');
     } catch {
-      // Direct browser Graph API verification for static hosting on techfairylab
       try {
         if (tokenInput && tokenInput.trim()) {
-          const igRes = await fetch(
-            `https://graph.instagram.com/v21.0/me?fields=id,user_id,username,name,account_type,profile_picture_url,followers_count,follows_count,media_count,biography&access_token=${encodeURIComponent(
-              tokenInput.trim()
-            )}`
+          const cleanToken = tokenInput.trim();
+          // Verify token & pull live media + insights via serverless `/api/analytics`
+          const verifyResp = await fetch(
+            `/api/analytics?handle=${encodeURIComponent(cleanHandle)}&refresh=true&strict_token=true`,
+            {
+              headers: { Authorization: `Bearer ${cleanToken}` },
+              cache: 'no-store',
+            }
           );
-          const igData = await igRes.json();
-          if (igData.error) {
-            throw new Error(igData.error.message || 'Invalid Instagram token');
+          if (!verifyResp.ok) {
+            const errJson = await verifyResp.json().catch(() => ({}));
+            throw new Error(errJson.error || 'Invalid Instagram Graph API token');
           }
+          const liveAna = await verifyResp.json();
+          localStorage.setItem('sa_ig_access_token', cleanToken);
           const updatedConn = {
-            instagram_handle: igData.username || cleanHandle,
+            instagram_handle: liveAna.profile?.username || cleanHandle,
             has_access_token: true,
-            account_id: igData.user_id || igData.id,
+            account_id: liveAna.profile?.account_id || '',
             webhook_verify_token: 'social_assist_verify_token',
           };
           localStorage.setItem('sa_connection', JSON.stringify(updatedConn));
-          const updatedAna = {
-            ...INITIAL_ANALYTICS,
-            source: 'instagram_graph_api',
-            profile: {
-              ...INITIAL_ANALYTICS.profile,
-              username: igData.username || cleanHandle,
-              name: igData.name || 'Anna | The Tech Fairy ✨',
-              followers_count: igData.followers_count || 16900,
-              media_count: igData.media_count || 158,
-            },
-          };
-          localStorage.setItem('sa_analytics_v4_real', JSON.stringify(updatedAna));
           setConnection(updatedConn);
-          setAnalyticsData(updatedAna);
+          setAnalyticsData(liveAna);
+          setOpenclawOutput(runLocalOpenClawAnalysis(openclawPrompt, liveAna));
           setConnectStatusMsg({
             type: 'success',
-            text: `Connected @${updatedConn.instagram_handle} via Instagram Graph API!`,
+            text: `Connected @${updatedConn.instagram_handle} via Official Instagram Graph API (live metrics synced)!`,
           });
-          showToast(`Connected @${updatedConn.instagram_handle}!`);
+          showToast(`Connected @${updatedConn.instagram_handle} via Graph API!`);
           setTokenInput('');
           triggerFairyWand();
         } else {
           const updatedConn = {
             instagram_handle: cleanHandle,
-            has_access_token: true,
+            has_access_token: Boolean(localStorage.getItem('sa_ig_access_token')),
             webhook_verify_token: 'social_assist_verify_token',
           };
           localStorage.setItem('sa_connection', JSON.stringify(updatedConn));
           setConnection(updatedConn);
+          await fetchLiveInstagramAnalytics({ forceRefresh: true, overrideHandle: cleanHandle });
           setConnectStatusMsg({
             type: 'success',
-            text: `Connected https://www.instagram.com/${cleanHandle}/ and opened Instagram login!`,
+            text: `Synced live Instagram stats for @${cleanHandle}!`,
           });
-          showToast(`Connected @${cleanHandle}!`);
+          showToast(`Synced live stats for @${cleanHandle}!`);
           triggerFairyWand();
         }
       } catch (innerErr) {
@@ -496,16 +534,12 @@ export default function App() {
   const handleRefreshAnalytics = async () => {
     setSyncing(true);
     try {
-      const res = await fetch('/api/analytics?refresh=true');
-      if (res.ok) {
-        const data = await res.json();
-        setAnalyticsData(data);
-      }
+      const fresh = await fetchLiveInstagramAnalytics({ forceRefresh: true });
       triggerFairyWand();
-      showToast('Refreshed Instagram analytics & strategy insights!');
+      const liveFollowers = (fresh?.profile?.followers_count || 0).toLocaleString();
+      showToast(`Live Instagram sync complete! (${liveFollowers} followers)`);
     } catch {
-      triggerFairyWand();
-      showToast('Refreshed Instagram analytics & strategy insights!');
+      showToast('Could not reach live Instagram endpoint — showing last known snapshot.', 'error');
     } finally {
       setSyncing(false);
     }
@@ -728,14 +762,7 @@ export default function App() {
     );
   }
 
-  const profile = analyticsData?.profile || {
-    username: 'techfairyanna',
-    name: 'Anna | The Tech Fairy ✨',
-    followers_count: 16900,
-    follows_count: 5,
-    media_count: 158,
-    profile_picture_url: './reels/anna_profile.png',
-  };
+  const profile = analyticsData?.profile || INITIAL_ANALYTICS.profile;
   const summary = {
     ...INITIAL_ANALYTICS.analysis.summary,
     ...(analyticsData?.analysis?.summary || {}),
@@ -749,35 +776,76 @@ export default function App() {
       : INITIAL_ANALYTICS.posts;
   const posts = rawPosts.map((p) => {
     const fallbackMatch = INITIAL_ANALYTICS.posts.find((fp) => fp.id === p.id) || {};
-    const views = p.views || fallbackMatch.views || 1000;
+    const views = typeof p.views === 'number' ? p.views : fallbackMatch.views || 0;
+    const likes = typeof p.likes === 'number' ? p.likes : fallbackMatch.likes || 0;
+    const comments = typeof p.comments === 'number' ? p.comments : fallbackMatch.comments || 0;
+    const saves = typeof p.saves === 'number' ? p.saves : null;
+    const shares = typeof p.shares === 'number' ? p.shares : null;
     const followersGained =
-      p.followers_gained ??
-      fallbackMatch.followers_gained ??
-      Math.max(Math.round(views * 0.0115), 5);
+      typeof p.followers_gained === 'number' ? p.followers_gained : null;
+    const engagementRate =
+      typeof p.engagement_rate === 'number'
+        ? p.engagement_rate
+        : views > 0
+        ? Number((((likes + comments + (saves || 0) + (shares || 0)) / views) * 100).toFixed(2))
+        : 0;
     return {
       ...fallbackMatch,
       ...p,
-      title: p.title || fallbackMatch.title || (p.caption || '').split('\n')[0].slice(0, 64),
-      published_label: p.published_label || fallbackMatch.published_label || 'Reel',
-      thumbnail_url: p.thumbnail_url || fallbackMatch.thumbnail_url || './reels/reel_sudo_rm.png',
+      views,
+      likes,
+      comments,
+      saves,
+      shares,
       followers_gained: followersGained,
       follower_conversion_rate:
-        p.follower_conversion_rate ??
-        fallbackMatch.follower_conversion_rate ??
-        Number(((followersGained / Math.max(views, 1)) * 100).toFixed(2)),
-      us_viewer_share_pct: p.us_viewer_share_pct ?? fallbackMatch.us_viewer_share_pct ?? 6.8,
+        followersGained !== null && views > 0
+          ? Number(((followersGained / views) * 100).toFixed(2))
+          : null,
+      engagement_rate: engagementRate,
+      title: p.title || fallbackMatch.title || (p.caption || '').split('\n')[0].slice(0, 68) || 'Instagram Reel',
+      published_label: p.published_label || fallbackMatch.published_label || 'Reel',
+      thumbnail_url: p.thumbnail_url || fallbackMatch.thumbnail_url || './reels/live_DeK6AFYOvNO.png',
+      fallback_thumbnail_url:
+        p.fallback_thumbnail_url || fallbackMatch.fallback_thumbnail_url || './reels/live_DeK6AFYOvNO.png',
       video_summary_text:
         p.video_summary_text ||
         fallbackMatch.video_summary_text ||
-        `HOOK: ${(p.caption || '').slice(0, 90)} | PERFORMANCE: ${views.toLocaleString()} views, +${followersGained} followers gained.`,
+        `CAPTION: ${(p.caption || '').slice(0, 140)} | LIVE METRICS: ${views.toLocaleString()} views, ${likes.toLocaleString()} likes, ${comments.toLocaleString()} comments (${engagementRate}% engagement rate).`,
     };
   });
+
+  const hasFollowerInsights = posts.some((p) => typeof p.followers_gained === 'number');
   const sortedPosts = [...posts].sort((a, b) => {
-    if (videoSortBy === 'views') return (b.views || 0) - (a.views || 0);
-    if (videoSortBy === 'conversion')
-      return (b.follower_conversion_rate || 0) - (a.follower_conversion_rate || 0);
-    return (b.followers_gained || 0) - (a.followers_gained || 0);
+    if (videoSortBy === 'likes') return (b.likes || 0) - (a.likes || 0);
+    if (videoSortBy === 'comments') return (b.comments || 0) - (a.comments || 0);
+    if (videoSortBy === 'engagement') return (b.engagement_rate || 0) - (a.engagement_rate || 0);
+    if (videoSortBy === 'recent')
+      return (b.taken_at_timestamp || 0) - (a.taken_at_timestamp || 0);
+    if (videoSortBy === 'followers' && hasFollowerInsights)
+      return (b.followers_gained || 0) - (a.followers_gained || 0);
+    return (b.views || 0) - (a.views || 0);
   });
+
+  const topByViews = [...posts].sort((a, b) => (b.views || 0) - (a.views || 0))[0] || {};
+  const topByComments = [...posts].sort((a, b) => (b.comments || 0) - (a.comments || 0))[0] || {};
+  const avgLikesPerPost =
+    posts.length > 0 ? Math.round((summary.total_likes || 0) / posts.length) : 0;
+
+  const isLiveSynced =
+    analyticsData?.source === 'live_instagram_public' ||
+    analyticsData?.source === 'live_instagram_sync' ||
+    analyticsData?.source === 'instagram_graph_api';
+  const isGraphApiLive = analyticsData?.source === 'instagram_graph_api';
+  const syncedTimeLabel = analyticsData?.fetched_at
+    ? new Date(analyticsData.fetched_at).toLocaleTimeString([], {
+        hour: 'numeric',
+        minute: '2-digit',
+        second: '2-digit',
+      })
+    : null;
+  const estimatedUsFollowers = Math.round((profile.followers_count || 0) * 0.068);
+
   const usActivity =
     analyticsData?.analysis?.us_audience_activity || INITIAL_ANALYTICS.analysis.us_audience_activity;
   const openclawBrief =
@@ -928,18 +996,30 @@ export default function App() {
               {/* Quick Editorial Pill Counters */}
               <div className="flex flex-wrap items-center gap-3 pt-1">
                 <div className="editorial-card-sm px-4 py-2 bg-white flex items-center gap-2.5">
-                  <span className="w-3 h-3 rounded-full bg-[#FF7EB6] border border-[#19154E]" />
-                  <span className="text-xs font-semibold text-neutral-600">Followers:</span>
+                  <span
+                    className={`w-3 h-3 rounded-full border border-[#19154E] ${
+                      isLiveSynced ? 'bg-emerald-400 animate-pulse' : 'bg-[#FF7EB6]'
+                    }`}
+                  />
+                  <span className="text-xs font-semibold text-neutral-600">Live Followers:</span>
                   <span className="font-display font-bold text-sm">
-                    {(profile.followers_count || 14820).toLocaleString()}
+                    {(profile.followers_count || 0).toLocaleString()}
                   </span>
                 </div>
 
                 <div className="editorial-card-sm px-4 py-2 bg-white flex items-center gap-2.5">
                   <span className="w-3 h-3 rounded-full bg-[#C8F904] border border-[#19154E]" />
-                  <span className="text-xs font-semibold text-neutral-600">Comment Lift:</span>
+                  <span className="text-xs font-semibold text-neutral-600">Posts:</span>
                   <span className="font-display font-bold text-sm">
-                    {summary.comment_lift_multiplier || 4.2}x Higher Reach
+                    {(profile.media_count || 0).toLocaleString()}
+                  </span>
+                </div>
+
+                <div className="editorial-card-sm px-4 py-2 bg-white flex items-center gap-2.5">
+                  <span className="w-3 h-3 rounded-full bg-[#FF7EB6] border border-[#19154E]" />
+                  <span className="text-xs font-semibold text-neutral-600">#1 Reel Views:</span>
+                  <span className="font-display font-bold text-sm">
+                    {(topByViews.views || 0).toLocaleString()}
                   </span>
                 </div>
 
@@ -948,7 +1028,7 @@ export default function App() {
                     onClick={() => setActiveTab('connect')}
                     className="editorial-btn px-4 py-2 rounded-2xl bg-[#FF7EB6] text-[#19154E] text-xs font-bold flex items-center gap-1.5"
                   >
-                    <span>Connect Live Instagram</span>
+                    <span>Connect Graph API</span>
                     <ArrowUpRight className="w-4 h-4" />
                   </button>
                 )}
@@ -1434,21 +1514,42 @@ export default function App() {
             {/* Astronomer Observatory Header Card */}
             <div className="editorial-card p-6 bg-white grid grid-cols-1 lg:grid-cols-12 gap-6 items-center">
               <div className="lg:col-span-8 space-y-3">
-                <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-[#EDE9FE] border-2 border-[#19154E] text-xs font-bold text-[#6D28D9]">
-                  <span>🔭 @techfairyanna Telemetry & US Audience Observatory</span>
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-[#EDE9FE] border-2 border-[#19154E] text-xs font-bold text-[#6D28D9]">
+                    <span>🔭 @{profile.username || 'techfairyanna'} Live Instagram Telemetry</span>
+                  </div>
+                  <div
+                    className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full border-2 border-[#19154E] text-xs font-bold ${
+                      isLiveSynced ? 'bg-[#C8F904] text-[#19154E]' : 'bg-[#FFE4F1] text-[#19154E]'
+                    }`}
+                  >
+                    <span
+                      className={`w-2 h-2 rounded-full border border-[#19154E] ${
+                        isLiveSynced ? 'bg-emerald-600 animate-pulse' : 'bg-amber-500'
+                      }`}
+                    />
+                    <span>
+                      {isGraphApiLive
+                        ? 'Official Graph API Live'
+                        : isLiveSynced
+                        ? 'Live from Instagram'
+                        : 'Offline Snapshot'}
+                      {syncedTimeLabel ? ` • Synced ${syncedTimeLabel}` : ''}
+                    </span>
+                  </div>
                 </div>
+
                 <h3 className="font-display text-2xl sm:text-3xl font-bold text-[#19154E]">
-                  Top Reels by{' '}
+                  Live Instagram Reels by{' '}
                   <span className="px-2.5 py-0.5 rounded-xl bg-[#FF7EB6] border-2 border-[#19154E]">
-                    Views &amp; Followers Gained
+                    Views, Likes &amp; Engagement
                   </span>{' '}
                   + US Active Windows
                 </h3>
                 <p className="text-xs sm:text-sm text-neutral-700 leading-relaxed">
-                  Rank your videos by <strong>Followers Gained</strong> or <strong>Views</strong>, inspect
-                  each video&apos;s structured <strong>Text Summary</strong> (Hook, Body, CTA &amp; Conversion
-                  Diagnosis), and send them straight to your <strong>OpenClaw Agent</strong> or time your next
-                  post for peak <strong>United States (US)</strong> activity.
+                  Pulling real-time follower counts, post counts, and per-Reel views, likes, comments,
+                  and engagement rates directly from <strong>@{profile.username || 'techfairyanna'}</strong> on Instagram.
+                  Auto-refreshes every 90s or click <strong>Sync Live Instagram Metrics</strong> anytime.
                 </p>
                 <div className="pt-1 flex flex-wrap items-center gap-2.5">
                   <button
@@ -1457,7 +1558,7 @@ export default function App() {
                     className="editorial-btn px-4 py-2 rounded-xl bg-[#C8F904] text-[#19154E] text-xs font-bold inline-flex items-center gap-2"
                   >
                     <RefreshCw className={`w-4 h-4 ${syncing ? 'animate-spin' : ''}`} />
-                    <span>Sync Latest Instagram Metrics</span>
+                    <span>{syncing ? 'Syncing Live from Instagram...' : 'Sync Live Instagram Metrics'}</span>
                   </button>
                   <button
                     onClick={() => {
@@ -1466,7 +1567,7 @@ export default function App() {
                     }}
                     className="editorial-btn px-4 py-2 rounded-xl bg-[#FF7EB6] text-[#19154E] text-xs font-bold inline-flex items-center gap-2"
                   >
-                    <span>🦞 Analyze Video Summaries in OpenClaw</span>
+                    <span>🦞 Analyze Live Stats in OpenClaw</span>
                     <ArrowUpRight className="w-4 h-4" />
                   </button>
                 </div>
@@ -1478,118 +1579,111 @@ export default function App() {
               </div>
             </div>
 
-            {/* 6 Bold Editorial Metric Cards */}
+            {/* 6 Bold Editorial Metric Cards — 100% Live Instagram Numbers */}
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">
               <div className="editorial-card-sm p-4 bg-white">
                 <div className="text-xs font-bold text-neutral-500 flex items-center justify-between">
-                  <span>TOTAL FOLLOWERS</span>
+                  <span>LIVE FOLLOWERS</span>
                   <Instagram className="w-4 h-4 text-[#FF7EB6]" />
                 </div>
                 <div className="font-display text-2xl font-bold text-[#19154E] mt-1.5">
-                  {(profile.followers_count || 16900).toLocaleString()}
+                  {(profile.followers_count || 0).toLocaleString()}
                 </div>
                 <div className="text-[11px] font-bold text-emerald-700 mt-1">
-                  {profile.media_count || 158} posts • +{summary.total_followers_gained || 1959} from top Reels
+                  {(profile.media_count || 0).toLocaleString()} posts
+                  {profile.follows_count ? ` • ${profile.follows_count} following` : ''}
                 </div>
               </div>
 
               <div className="editorial-card-sm p-4 bg-[#FF7EB6]">
                 <div className="text-xs font-bold text-[#19154E] flex items-center justify-between">
-                  <span>30-DAY VIEWS</span>
+                  <span>#1 REEL VIEWS</span>
                   <Eye className="w-4 h-4 text-[#19154E]" />
                 </div>
                 <div className="font-display text-2xl font-bold text-[#19154E] mt-1.5">
-                  {(summary.account_views_30d || 469204).toLocaleString()}
+                  {(topByViews.views || 0).toLocaleString()}
                 </div>
-                <div className="text-[11px] font-bold text-[#19154E] mt-1">
-                  {summary.non_follower_views_pct || 81.3}% Non-followers • Top: 46K
+                <div className="text-[11px] font-bold text-[#19154E] mt-1 truncate">
+                  {(topByViews.likes || 0).toLocaleString()} Likes • {(topByViews.comments || 0).toLocaleString()} Comments
                 </div>
               </div>
 
               <div className="editorial-card-sm p-4 bg-white">
                 <div className="text-xs font-bold text-neutral-500 flex items-center justify-between">
-                  <span>ACCOUNTS REACHED</span>
+                  <span>TRACKED VIEWS</span>
                   <TrendingUp className="w-4 h-4 text-[#6D28D9]" />
                 </div>
                 <div className="font-display text-2xl font-bold text-[#19154E] mt-1.5">
-                  {(summary.accounts_reached_30d || 202193).toLocaleString()}
+                  {(summary.total_views || 0).toLocaleString()}
                 </div>
                 <div className="text-[11px] font-bold text-emerald-700 mt-1">
-                  +32.7% vs prev 30 days
+                  Across {posts.length} live Reels
                 </div>
               </div>
 
               <div className="editorial-card-sm p-4 bg-[#C8F904]">
                 <div className="text-xs font-bold text-[#19154E] flex items-center justify-between">
-                  <span>🇺🇸 US AUDIENCE</span>
+                  <span>LIVE LIKES</span>
                   <Sparkles className="w-4 h-4 text-[#19154E]" />
                 </div>
                 <div className="font-display text-2xl font-bold text-[#19154E] mt-1.5">
-                  {usActivity.us_audience_share_pct}%
+                  {(summary.total_likes || 0).toLocaleString()}
                 </div>
                 <div className="text-[11px] font-bold text-[#19154E] mt-1">
-                  #2 Country (~1,150) • Peak 6–8 PM EST
+                  Avg {avgLikesPerPost.toLocaleString()} likes / Reel
                 </div>
               </div>
 
               <div className="editorial-card-sm p-4 bg-[#B799E8]">
                 <div className="text-xs font-bold text-[#19154E] flex items-center justify-between">
-                  <span>INTERACTIONS (30D)</span>
+                  <span>LIVE COMMENTS</span>
                   <MessageCircle className="w-4 h-4 text-[#19154E]" />
                 </div>
                 <div className="font-display text-2xl font-bold text-[#19154E] mt-1.5">
-                  {(summary.interactions_30d || 40487).toLocaleString()}
+                  {(summary.total_comments || 0).toLocaleString()}
                 </div>
                 <div className="text-[11px] font-bold text-[#19154E] mt-1">
-                  96.9% Reels • {summary.comment_lift_multiplier}x DM Lift
+                  Top Reel: {(topByComments.comments || 0).toLocaleString()} comments
                 </div>
               </div>
 
               <div className="editorial-card-sm p-4 bg-white">
                 <div className="text-xs font-bold text-neutral-500 flex items-center justify-between">
-                  <span>FOLLOWERS GAINED</span>
+                  <span>AVG ENGAGEMENT</span>
                   <Send className="w-4 h-4 text-[#FF7EB6]" />
                 </div>
                 <div className="font-display text-2xl font-bold text-[#6D28D9] mt-1.5">
-                  +{(summary.total_followers_gained || 1959).toLocaleString()}
+                  {summary.avg_engagement_rate || 0}%
                 </div>
                 <div className="text-[11px] font-semibold text-neutral-600 mt-1">
-                  {summary.avg_follower_conversion_rate || 1.44}% View→Follow Rate
+                  {typeof summary.total_followers_gained === 'number'
+                    ? `+${summary.total_followers_gained.toLocaleString()} followers (Graph API)`
+                    : `(Likes + Comments) ÷ Views`}
                 </div>
               </div>
             </div>
 
             {/* ============================================================
-                GOAL 1 & 2: TOP PERFORMING VIDEOS (VIEWS + FOLLOWERS GAINED)
+                GOAL 1 & 2: LIVE INSTAGRAM REELS RANKING
                 & STRUCTURED TEXT SUMMARIES FOR OPENCLAW AGENT
             ============================================================ */}
             <div className="editorial-card bg-white overflow-hidden">
               <div className="p-5 border-b-2 border-[#19154E] bg-[#F5EEFF] flex flex-col lg:flex-row lg:items-center justify-between gap-4">
                 <div>
                   <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-[#FF7EB6] border border-[#19154E] text-[11px] font-bold text-[#19154E] mb-1">
-                    <span>🎬 Goal #1 &amp; #2: Video Performance &amp; Agent Text Summaries</span>
+                    <span>🎬 Live Instagram Reels Performance &amp; Agent Text Summaries</span>
                   </div>
                   <h3 className="font-display font-bold text-lg sm:text-xl text-[#19154E]">
-                    What Videos Perform Best (Views &amp; Followers Gained) + Text Summaries
+                    Live Reels on @{profile.username || 'techfairyanna'} (Direct from Instagram)
                   </h3>
                   <p className="text-xs font-medium text-neutral-700">
-                    Every video is summarized into structured text (Hook, Body, CTA, Why It Converted) ready for OpenClaw analysis.
+                    Live views, likes, comments, and engagement rates pulled directly from Instagram, paired with structured summaries for OpenClaw.
                   </p>
                 </div>
 
                 {/* Sort Selector Buttons */}
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-xs font-bold text-[#19154E]">Rank Videos By:</span>
-                  <button
-                    onClick={() => setVideoSortBy('followers')}
-                    className={`px-3 py-1.5 rounded-xl text-xs font-bold border-2 border-[#19154E] transition-colors duration-150 ${
-                      videoSortBy === 'followers'
-                        ? 'bg-[#FF7EB6] text-[#19154E]'
-                        : 'bg-white text-[#19154E] hover:bg-[#FFF8FC]'
-                    }`}
-                  >
-                    🏆 Followers Gained
-                  </button>
+                  <span className="text-xs font-bold text-[#19154E]">Rank By:</span>
                   <button
                     onClick={() => setVideoSortBy('views')}
                     className={`px-3 py-1.5 rounded-xl text-xs font-bold border-2 border-[#19154E] transition-colors duration-150 ${
@@ -1598,18 +1692,50 @@ export default function App() {
                         : 'bg-white text-[#19154E] hover:bg-[#FFF8FC]'
                     }`}
                   >
-                    👁️ Total Views
+                    👁️ Live Views
                   </button>
                   <button
-                    onClick={() => setVideoSortBy('conversion')}
+                    onClick={() => setVideoSortBy('likes')}
                     className={`px-3 py-1.5 rounded-xl text-xs font-bold border-2 border-[#19154E] transition-colors duration-150 ${
-                      videoSortBy === 'conversion'
+                      videoSortBy === 'likes'
+                        ? 'bg-[#FF7EB6] text-[#19154E]'
+                        : 'bg-white text-[#19154E] hover:bg-[#FFF8FC]'
+                    }`}
+                  >
+                    ❤️ Live Likes
+                  </button>
+                  <button
+                    onClick={() => setVideoSortBy('engagement')}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-bold border-2 border-[#19154E] transition-colors duration-150 ${
+                      videoSortBy === 'engagement'
                         ? 'bg-[#B799E8] text-[#19154E]'
                         : 'bg-white text-[#19154E] hover:bg-[#FFF8FC]'
                     }`}
                   >
-                    🎯 Follower Conversion %
+                    ⚡ Engagement %
                   </button>
+                  <button
+                    onClick={() => setVideoSortBy('recent')}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-bold border-2 border-[#19154E] transition-colors duration-150 ${
+                      videoSortBy === 'recent'
+                        ? 'bg-[#19154E] text-[#FFF8FC]'
+                        : 'bg-white text-[#19154E] hover:bg-[#FFF8FC]'
+                    }`}
+                  >
+                    🕒 Newest
+                  </button>
+                  {hasFollowerInsights && (
+                    <button
+                      onClick={() => setVideoSortBy('followers')}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold border-2 border-[#19154E] transition-colors duration-150 ${
+                        videoSortBy === 'followers'
+                          ? 'bg-[#FF7EB6] text-[#19154E]'
+                          : 'bg-white text-[#19154E] hover:bg-[#FFF8FC]'
+                      }`}
+                    >
+                      🏆 Followers Gained
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -1626,16 +1752,32 @@ export default function App() {
                     <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 border-b-2 border-dashed border-neutral-200 pb-3.5">
                       <div className="flex items-start gap-3.5">
                         {post.thumbnail_url && (
-                          <div className="relative shrink-0">
+                          <a
+                            href={post.permalink}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="relative shrink-0 group"
+                            title="Open Reel on Instagram"
+                          >
                             <img
                               src={post.thumbnail_url}
                               alt={post.title}
-                              className="w-20 h-28 sm:w-24 sm:h-32 rounded-xl border-2 border-[#19154E] object-cover shadow-[2px_2px_0px_#19154E] bg-[#19154E]"
+                              onError={(e) => {
+                                if (
+                                  post.fallback_thumbnail_url &&
+                                  e.currentTarget.src !== post.fallback_thumbnail_url &&
+                                  !e.currentTarget.dataset.fallbackApplied
+                                ) {
+                                  e.currentTarget.dataset.fallbackApplied = 'true';
+                                  e.currentTarget.src = post.fallback_thumbnail_url;
+                                }
+                              }}
+                              className="w-20 h-28 sm:w-24 sm:h-32 rounded-xl border-2 border-[#19154E] object-cover shadow-[2px_2px_0px_#19154E] bg-[#19154E] group-hover:scale-[1.02] transition-transform duration-150"
                             />
                             <span className="absolute bottom-1 left-1 right-1 text-center text-[9px] font-extrabold px-1 py-0.5 rounded bg-[#19154E]/90 text-[#C8F904]">
                               ▶ {(post.views || 0).toLocaleString()}
                             </span>
-                          </div>
+                          </a>
                         )}
                         <div className="space-y-1">
                           <div className="flex items-center gap-2 flex-wrap">
@@ -1650,15 +1792,27 @@ export default function App() {
                                   : 'bg-neutral-100 text-[#19154E]'
                               }`}
                             >
-                              #{idx + 1} {idx === 0 ? 'TOP PERFORMER' : idx < 3 ? 'HIGH PERFORMER' : 'POPULAR REEL'}
+                              #{idx + 1} {idx === 0 ? 'TOP PERFORMER' : idx < 3 ? 'HIGH PERFORMER' : 'LIVE REEL'}
                             </span>
                             <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-lg border border-[#19154E] bg-[#EDE9FE] text-[#6D28D9]">
                               {post.type} • {post.published_label || 'Reel'}
+                              {post.duration_sec ? ` • ${post.duration_sec}s` : ''}
                             </span>
                             {post.best_keyword && !post.best_keyword.includes('None') && (
                               <span className="font-mono-code text-[11px] font-bold px-2.5 py-0.5 rounded-lg bg-[#C8F904] text-[#19154E] border border-[#19154E]">
                                 Trigger: &quot;{post.best_keyword}&quot;
                               </span>
+                            )}
+                            {post.permalink && (
+                              <a
+                                href={post.permalink}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="text-[11px] font-bold px-2.5 py-0.5 rounded-lg bg-white border border-[#19154E] text-[#19154E] hover:bg-[#C8F904] inline-flex items-center gap-1 transition-colors duration-150"
+                              >
+                                <span>Instagram</span>
+                                <ExternalLink className="w-3 h-3" />
+                              </a>
                             )}
                           </div>
                           <h4 className="font-display font-bold text-base sm:text-lg text-[#19154E]">
@@ -1668,43 +1822,54 @@ export default function App() {
                         </div>
                       </div>
 
-                      {/* Key Performance Badges: Views & Followers Gained */}
+                      {/* Key Live Performance Badges */}
                       <div className="flex flex-wrap items-center gap-2.5 shrink-0">
-                        <div className="px-3.5 py-2 rounded-xl bg-[#FF7EB6] border-2 border-[#19154E] text-center">
-                          <div className="text-[10px] font-extrabold uppercase text-[#19154E]">
-                            Followers Gained
-                          </div>
-                          <div className="font-display font-bold text-base text-[#19154E]">
-                            +{(post.followers_gained || 0).toLocaleString()}
-                          </div>
-                        </div>
-
                         <div className="px-3.5 py-2 rounded-xl bg-[#C8F904] border-2 border-[#19154E] text-center">
                           <div className="text-[10px] font-extrabold uppercase text-[#19154E]">
-                            Views
+                            Live Views
                           </div>
                           <div className="font-display font-bold text-base text-[#19154E]">
                             {(post.views || 0).toLocaleString()}
                           </div>
                         </div>
 
+                        <div className="px-3.5 py-2 rounded-xl bg-[#FF7EB6] border-2 border-[#19154E] text-center">
+                          <div className="text-[10px] font-extrabold uppercase text-[#19154E]">
+                            Live Likes
+                          </div>
+                          <div className="font-display font-bold text-base text-[#19154E]">
+                            {(post.likes || 0).toLocaleString()}
+                          </div>
+                        </div>
+
                         <div className="px-3 py-2 rounded-xl bg-[#F5EEFF] border-2 border-[#19154E] text-center">
                           <div className="text-[10px] font-bold uppercase text-[#6D28D9]">
-                            Follow Conv.
+                            Comments
                           </div>
                           <div className="font-display font-bold text-sm text-[#19154E]">
-                            {post.follower_conversion_rate}%
+                            {(post.comments || 0).toLocaleString()}
                           </div>
                         </div>
 
                         <div className="px-3 py-2 rounded-xl bg-white border-2 border-[#19154E] text-center">
                           <div className="text-[10px] font-bold uppercase text-neutral-500">
-                            🇺🇸 US Viewers
+                            Eng. Rate
                           </div>
                           <div className="font-display font-bold text-sm text-[#19154E]">
-                            {post.us_viewer_share_pct}%
+                            {post.engagement_rate}%
                           </div>
                         </div>
+
+                        {typeof post.followers_gained === 'number' && (
+                          <div className="px-3 py-2 rounded-xl bg-[#EDE9FE] border-2 border-[#19154E] text-center">
+                            <div className="text-[10px] font-bold uppercase text-[#6D28D9]">
+                              +Followers
+                            </div>
+                            <div className="font-display font-bold text-sm text-[#19154E]">
+                              +{post.followers_gained.toLocaleString()}
+                            </div>
+                          </div>
+                        )}
                       </div>
                     </div>
 
@@ -1712,14 +1877,14 @@ export default function App() {
                     <div className="mt-3.5 p-3.5 rounded-xl bg-[#FFF8FC] border-2 border-[#19154E] space-y-2">
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <span className="text-[11px] font-extrabold uppercase tracking-wider text-[#6D28D9] flex items-center gap-1.5">
-                          <span>📝 Video Text Summary (For AI Agent Analysis)</span>
+                          <span>📝 Video Text Summary &amp; Live Metrics (For AI Agent Analysis)</span>
                         </span>
                         <div className="flex items-center gap-2">
                           <button
                             type="button"
                             onClick={() =>
                               copyToClipboard(
-                                `${post.title}\nViews: ${post.views} | Followers Gained: +${post.followers_gained} (${post.follower_conversion_rate}%)\nSummary: ${post.video_summary_text}`,
+                                `${post.title}\nPermalink: ${post.permalink}\nLive Views: ${(post.views || 0).toLocaleString()} | Live Likes: ${(post.likes || 0).toLocaleString()} | Live Comments: ${(post.comments || 0).toLocaleString()} | ER: ${post.engagement_rate}%\nSummary: ${post.video_summary_text}`,
                                 `summary-${post.id}`
                               )
                             }
@@ -1740,7 +1905,7 @@ export default function App() {
                           <button
                             type="button"
                             onClick={() => {
-                              const customP = `Analyze this video summary for "${post.title}" (${post.views.toLocaleString()} views, +${post.followers_gained} followers gained, ${post.follower_conversion_rate}% conversion): ${post.video_summary_text} — Why did it perform this way and how can I replicate or improve it for my US audience?`;
+                              const customP = `Analyze this live Instagram Reel for "${post.title}" (${(post.views || 0).toLocaleString()} live views, ${(post.likes || 0).toLocaleString()} likes, ${(post.comments || 0).toLocaleString()} comments, ${post.engagement_rate}% engagement rate): ${post.video_summary_text} — Why did it perform this way and how can I replicate or improve it for my US audience?`;
                               setActiveTab('strategy');
                               handleRunOpenClaw(customP);
                             }}
@@ -1754,11 +1919,16 @@ export default function App() {
                         {post.video_summary_text}
                       </p>
                       <div className="pt-1 flex flex-wrap items-center gap-4 text-[11px] font-bold text-neutral-600">
+                        <span>👁️ Views: {(post.views || 0).toLocaleString()}</span>
                         <span>❤️ Likes: {(post.likes || 0).toLocaleString()}</span>
                         <span>💬 Comments: {(post.comments || 0).toLocaleString()}</span>
-                        <span>📌 Saves: {(post.saves || 0).toLocaleString()}</span>
-                        <span>🔁 Shares: {(post.shares || 0).toLocaleString()}</span>
-                        <span>✉️ Auto-DMs: {post.dm_triggers ?? 0}</span>
+                        {typeof post.saves === 'number' && (
+                          <span>📌 Saves: {post.saves.toLocaleString()}</span>
+                        )}
+                        {typeof post.shares === 'number' && (
+                          <span>🔁 Shares: {post.shares.toLocaleString()}</span>
+                        )}
+                        {post.PostingHour && <span>🕒 Posted: {post.PostingHour}</span>}
                         <span>⚡ Eng. Rate: {post.engagement_rate}%</span>
                       </div>
                     </div>
@@ -1781,7 +1951,8 @@ export default function App() {
                     When Your United States Followers Are Most Active (EST)
                   </h3>
                   <p className="text-xs font-medium text-neutral-700">
-                    <strong>{usActivity.us_audience_share_pct}%</strong> of @techfairyanna&apos;s 16.9K audience is in the United States (#2 Country after India 24.9%). Compare US active hours against all global followers.
+                    <strong>{usActivity.us_audience_share_pct}%</strong> (~{estimatedUsFollowers.toLocaleString()} engineers) of @{profile.username || 'techfairyanna'}&apos;s{' '}
+                    <strong>{(profile.followers_count || 0).toLocaleString()}</strong> live audience is in the United States (#2 Country after India 24.9%).
                   </p>
                 </div>
                 <div className="flex items-center gap-3 text-xs font-bold">
@@ -1831,7 +2002,7 @@ export default function App() {
 
                     <div className="p-4 rounded-2xl bg-[#FFFDF9] border-2 border-[#19154E] space-y-2">
                       <div className="text-xs font-extrabold uppercase text-[#19154E]">
-                        👥 Follower Age &amp; Gender Split (16.9K Followers)
+                        👥 Follower Age &amp; Gender Split ({(profile.followers_count || 0).toLocaleString()} Live Followers)
                       </div>
                       <div className="flex flex-wrap items-center gap-2 text-xs font-bold">
                         {(usActivity.age_ranges || []).slice(0, 4).map((a) => (
@@ -1839,7 +2010,7 @@ export default function App() {
                             key={a.range}
                             className="px-2.5 py-1 rounded-xl bg-white border border-[#19154E] text-[#19154E]"
                           >
-                            Age {a.range}: <strong className="text-[#6D28D9]">{a.pct}%</strong>
+                            Age {a.range}: <strong className="text-[#6D28D9]">{a.pct ?? a.share_pct}%</strong>
                           </span>
                         ))}
                         {usActivity.gender_split && (
@@ -2073,19 +2244,22 @@ export default function App() {
                   </div>
                   <div className="lg:col-span-6">
                     <label className="block text-[11px] font-extrabold uppercase text-[#19154E] mb-1">
-                      📡 SocialAssist Video Brief Feed URL (For External OpenClaw Skills)
+                      📡 Live Instagram Telemetry Feed URL (For External OpenClaw Skills)
                     </label>
                     <div className="flex gap-2">
                       <input
                         type="text"
                         readOnly
-                        value="http://localhost:8000/api/openclaw/brief"
+                        value={`${typeof window !== 'undefined' ? window.location.origin : 'https://www.techfairylab.com'}/api/analytics`}
                         className="flex-1 px-3 py-2 rounded-xl bg-white border-2 border-[#19154E] text-xs font-mono-code font-bold text-[#19154E]"
                       />
                       <button
                         type="button"
                         onClick={() =>
-                          copyToClipboard('http://localhost:8000/api/openclaw/brief', 'brief-url')
+                          copyToClipboard(
+                            `${typeof window !== 'undefined' ? window.location.origin : 'https://www.techfairylab.com'}/api/analytics`,
+                            'brief-url'
+                          )
                         }
                         className="px-3 py-2 rounded-xl bg-[#EDE9FE] border-2 border-[#19154E] text-xs font-bold text-[#19154E]"
                       >
@@ -2100,7 +2274,7 @@ export default function App() {
                   <div className="p-4 rounded-2xl bg-[#19154E] text-[#FFF8FC] border-2 border-[#19154E] space-y-2">
                     <div className="flex items-center justify-between">
                       <span className="text-xs font-bold text-[#C8F904]">
-                        Compiled Video Text Summaries + US Active Hours Brief (Auto-fed to OpenClaw):
+                        Compiled Live Instagram Metrics + US Active Hours Brief (Auto-fed to OpenClaw):
                       </span>
                       <button
                         type="button"
@@ -2121,9 +2295,9 @@ export default function App() {
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="text-xs font-bold text-[#19154E]">Quick Agent Tasks:</span>
                     {[
-                      'Compare my top 3 videos by Followers Gained and write 3 new Reel scripts',
-                      'Why did my Python Script Reel gain +492 followers while my Desk Tour gained +19?',
-                      'Build a 7-day US Audience posting schedule (EST & PST) from my video summaries',
+                      'Compare my top 3 live Reels by Views & Engagement Rate and write 3 new Reel scripts',
+                      'Why did my sudo rm -rf / Reel and Network Down Panic Reel break out on Reels Explore?',
+                      'Build a 7-day US Audience posting schedule (EST & PST) from my live Reel stats',
                     ].map((preset) => (
                       <button
                         key={preset}
