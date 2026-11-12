@@ -165,6 +165,7 @@ export default function App() {
       setAnalyticsData(anaRes);
     } catch {
       // Standalone static page mode (inside techfairylab website)
+      localStorage.removeItem('sa_analytics');
       const savedFlows = JSON.parse(localStorage.getItem('sa_automations') || 'null') || INITIAL_AUTOMATIONS;
       const savedLogs = JSON.parse(localStorage.getItem('sa_logs') || '[]');
       const savedConn = JSON.parse(localStorage.getItem('sa_connection') || 'null') || {
@@ -172,7 +173,9 @@ export default function App() {
         has_access_token: false,
         webhook_verify_token: 'social_assist_verify_token',
       };
-      const savedAna = JSON.parse(localStorage.getItem('sa_analytics') || 'null') || INITIAL_ANALYTICS;
+      const cachedAna = JSON.parse(localStorage.getItem('sa_analytics_v4_real') || 'null');
+      const hasRealVideos = cachedAna?.posts?.some((p) => p.id === 'reel_sudo_rm');
+      const savedAna = hasRealVideos ? cachedAna : INITIAL_ANALYTICS;
       setConnection(savedConn);
       setHandleInput(
         `https://www.instagram.com/${(savedConn.instagram_handle || 'techfairyanna').replace(/^@/, '')}/`
@@ -301,12 +304,12 @@ export default function App() {
             profile: {
               ...INITIAL_ANALYTICS.profile,
               username: igData.username || cleanHandle,
-              name: igData.name || 'Tech Fairy Anna ✨',
-              followers_count: igData.followers_count || 14820,
-              media_count: igData.media_count || 94,
+              name: igData.name || 'Anna | The Tech Fairy ✨',
+              followers_count: igData.followers_count || 16900,
+              media_count: igData.media_count || 158,
             },
           };
-          localStorage.setItem('sa_analytics', JSON.stringify(updatedAna));
+          localStorage.setItem('sa_analytics_v4_real', JSON.stringify(updatedAna));
           setConnection(updatedConn);
           setAnalyticsData(updatedAna);
           setConnectStatusMsg({
@@ -727,9 +730,11 @@ export default function App() {
 
   const profile = analyticsData?.profile || {
     username: 'techfairyanna',
-    name: 'Tech Fairy Anna ✨',
-    followers_count: 14820,
-    media_count: 94,
+    name: 'Anna | The Tech Fairy ✨',
+    followers_count: 16900,
+    follows_count: 5,
+    media_count: 158,
+    profile_picture_url: './reels/anna_profile.png',
   };
   const summary = {
     ...INITIAL_ANALYTICS.analysis.summary,
@@ -753,12 +758,14 @@ export default function App() {
       ...fallbackMatch,
       ...p,
       title: p.title || fallbackMatch.title || (p.caption || '').split('\n')[0].slice(0, 64),
+      published_label: p.published_label || fallbackMatch.published_label || 'Reel',
+      thumbnail_url: p.thumbnail_url || fallbackMatch.thumbnail_url || './reels/reel_sudo_rm.png',
       followers_gained: followersGained,
       follower_conversion_rate:
         p.follower_conversion_rate ??
         fallbackMatch.follower_conversion_rate ??
         Number(((followersGained / Math.max(views, 1)) * 100).toFixed(2)),
-      us_viewer_share_pct: p.us_viewer_share_pct ?? fallbackMatch.us_viewer_share_pct ?? 70,
+      us_viewer_share_pct: p.us_viewer_share_pct ?? fallbackMatch.us_viewer_share_pct ?? 6.8,
       video_summary_text:
         p.video_summary_text ||
         fallbackMatch.video_summary_text ||
@@ -1479,36 +1486,36 @@ export default function App() {
                   <Instagram className="w-4 h-4 text-[#FF7EB6]" />
                 </div>
                 <div className="font-display text-2xl font-bold text-[#19154E] mt-1.5">
-                  {(profile.followers_count || 14820).toLocaleString()}
+                  {(profile.followers_count || 16900).toLocaleString()}
                 </div>
                 <div className="text-[11px] font-bold text-emerald-700 mt-1">
-                  +{summary.total_followers_gained || 1476} from recent videos
+                  {profile.media_count || 158} posts • +{summary.total_followers_gained || 1959} from top Reels
                 </div>
               </div>
 
               <div className="editorial-card-sm p-4 bg-[#FF7EB6]">
                 <div className="text-xs font-bold text-[#19154E] flex items-center justify-between">
-                  <span>FOLLOWERS GAINED</span>
-                  <TrendingUp className="w-4 h-4 text-[#19154E]" />
+                  <span>30-DAY VIEWS</span>
+                  <Eye className="w-4 h-4 text-[#19154E]" />
                 </div>
                 <div className="font-display text-2xl font-bold text-[#19154E] mt-1.5">
-                  +{(summary.total_followers_gained || 1476).toLocaleString()}
+                  {(summary.account_views_30d || 469204).toLocaleString()}
                 </div>
                 <div className="text-[11px] font-bold text-[#19154E] mt-1">
-                  {summary.avg_follower_conversion_rate || 1.24}% View→Follow Rate
+                  {summary.non_follower_views_pct || 81.3}% Non-followers • Top: 46K
                 </div>
               </div>
 
               <div className="editorial-card-sm p-4 bg-white">
                 <div className="text-xs font-bold text-neutral-500 flex items-center justify-between">
-                  <span>TOTAL VIEWS</span>
-                  <Eye className="w-4 h-4 text-[#6D28D9]" />
+                  <span>ACCOUNTS REACHED</span>
+                  <TrendingUp className="w-4 h-4 text-[#6D28D9]" />
                 </div>
                 <div className="font-display text-2xl font-bold text-[#19154E] mt-1.5">
-                  {(summary.total_views || 0).toLocaleString()}
+                  {(summary.accounts_reached_30d || 202193).toLocaleString()}
                 </div>
-                <div className="text-[11px] font-semibold text-neutral-600 mt-1">
-                  Top Reel: 34,800 views
+                <div className="text-[11px] font-bold text-emerald-700 mt-1">
+                  +32.7% vs prev 30 days
                 </div>
               </div>
 
@@ -1521,30 +1528,34 @@ export default function App() {
                   {usActivity.us_audience_share_pct}%
                 </div>
                 <div className="text-[11px] font-bold text-[#19154E] mt-1">
-                  Peak: 6–8 PM EST (98%)
+                  #2 Country (~1,150) • Peak 6–8 PM EST
                 </div>
               </div>
 
               <div className="editorial-card-sm p-4 bg-[#B799E8]">
                 <div className="text-xs font-bold text-[#19154E] flex items-center justify-between">
-                  <span>COMMENT LIFT</span>
+                  <span>INTERACTIONS (30D)</span>
                   <MessageCircle className="w-4 h-4 text-[#19154E]" />
                 </div>
                 <div className="font-display text-2xl font-bold text-[#19154E] mt-1.5">
-                  {summary.comment_lift_multiplier}x
+                  {(summary.interactions_30d || 40487).toLocaleString()}
                 </div>
-                <div className="text-[11px] font-bold text-[#19154E] mt-1">With DM Keyword</div>
+                <div className="text-[11px] font-bold text-[#19154E] mt-1">
+                  96.9% Reels • {summary.comment_lift_multiplier}x DM Lift
+                </div>
               </div>
 
               <div className="editorial-card-sm p-4 bg-white">
                 <div className="text-xs font-bold text-neutral-500 flex items-center justify-between">
-                  <span>AUTO-DMS SENT</span>
+                  <span>FOLLOWERS GAINED</span>
                   <Send className="w-4 h-4 text-[#FF7EB6]" />
                 </div>
                 <div className="font-display text-2xl font-bold text-[#6D28D9] mt-1.5">
-                  {(summary.estimated_dm_conversions || 0).toLocaleString()}
+                  +{(summary.total_followers_gained || 1959).toLocaleString()}
                 </div>
-                <div className="text-[11px] font-semibold text-neutral-600 mt-1">Instant links sent</div>
+                <div className="text-[11px] font-semibold text-neutral-600 mt-1">
+                  {summary.avg_follower_conversion_rate || 1.44}% View→Follow Rate
+                </div>
               </div>
             </div>
 
@@ -1612,35 +1623,49 @@ export default function App() {
                         : 'bg-white'
                     }`}
                   >
-                    <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 border-b-2 border-dashed border-neutral-200 pb-3.5">
-                      <div className="space-y-1">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span
-                            className={`text-xs font-extrabold px-2.5 py-0.5 rounded-lg border-2 border-[#19154E] ${
-                              idx === 0
-                                ? 'bg-[#C8F904] text-[#19154E]'
-                                : idx === 1
-                                ? 'bg-[#FF7EB6] text-[#19154E]'
-                                : idx === 2
-                                ? 'bg-[#B799E8] text-[#19154E]'
-                                : 'bg-neutral-100 text-[#19154E]'
-                            }`}
-                          >
-                            #{idx + 1} {idx === 0 ? 'TOP PERFORMER' : idx < 3 ? 'HIGH PERFORMER' : 'BASELINE'}
-                          </span>
-                          <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-lg border border-[#19154E] bg-[#EDE9FE] text-[#6D28D9]">
-                            {post.type}
-                          </span>
-                          {post.best_keyword && !post.best_keyword.includes('None') && (
-                            <span className="font-mono-code text-[11px] font-bold px-2.5 py-0.5 rounded-lg bg-[#C8F904] text-[#19154E] border border-[#19154E]">
-                              Trigger: &quot;{post.best_keyword}&quot;
+                    <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 border-b-2 border-dashed border-neutral-200 pb-3.5">
+                      <div className="flex items-start gap-3.5">
+                        {post.thumbnail_url && (
+                          <div className="relative shrink-0">
+                            <img
+                              src={post.thumbnail_url}
+                              alt={post.title}
+                              className="w-20 h-28 sm:w-24 sm:h-32 rounded-xl border-2 border-[#19154E] object-cover shadow-[2px_2px_0px_#19154E] bg-[#19154E]"
+                            />
+                            <span className="absolute bottom-1 left-1 right-1 text-center text-[9px] font-extrabold px-1 py-0.5 rounded bg-[#19154E]/90 text-[#C8F904]">
+                              ▶ {(post.views || 0).toLocaleString()}
                             </span>
-                          )}
+                          </div>
+                        )}
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span
+                              className={`text-xs font-extrabold px-2.5 py-0.5 rounded-lg border-2 border-[#19154E] ${
+                                idx === 0
+                                  ? 'bg-[#C8F904] text-[#19154E]'
+                                  : idx === 1
+                                  ? 'bg-[#FF7EB6] text-[#19154E]'
+                                  : idx === 2
+                                  ? 'bg-[#B799E8] text-[#19154E]'
+                                  : 'bg-neutral-100 text-[#19154E]'
+                              }`}
+                            >
+                              #{idx + 1} {idx === 0 ? 'TOP PERFORMER' : idx < 3 ? 'HIGH PERFORMER' : 'POPULAR REEL'}
+                            </span>
+                            <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-lg border border-[#19154E] bg-[#EDE9FE] text-[#6D28D9]">
+                              {post.type} • {post.published_label || 'Reel'}
+                            </span>
+                            {post.best_keyword && !post.best_keyword.includes('None') && (
+                              <span className="font-mono-code text-[11px] font-bold px-2.5 py-0.5 rounded-lg bg-[#C8F904] text-[#19154E] border border-[#19154E]">
+                                Trigger: &quot;{post.best_keyword}&quot;
+                              </span>
+                            )}
+                          </div>
+                          <h4 className="font-display font-bold text-base sm:text-lg text-[#19154E]">
+                            {post.title}
+                          </h4>
+                          <p className="text-xs text-neutral-600 line-clamp-2">{post.caption}</p>
                         </div>
-                        <h4 className="font-display font-bold text-base sm:text-lg text-[#19154E]">
-                          {post.title}
-                        </h4>
-                        <p className="text-xs text-neutral-600 line-clamp-1">{post.caption}</p>
                       </div>
 
                       {/* Key Performance Badges: Views & Followers Gained */}
@@ -1756,7 +1781,7 @@ export default function App() {
                     When Your United States Followers Are Most Active (EST)
                   </h3>
                   <p className="text-xs font-medium text-neutral-700">
-                    <strong>{usActivity.us_audience_share_pct}%</strong> of @techfairyanna&apos;s audience is in the United States. Compare US active hours (pink/lime) against all global followers (lilac).
+                    <strong>{usActivity.us_audience_share_pct}%</strong> of @techfairyanna&apos;s 16.9K audience is in the United States (#2 Country after India 24.9%). Compare US active hours against all global followers.
                   </p>
                 </div>
                 <div className="flex items-center gap-3 text-xs font-bold">
@@ -1777,6 +1802,55 @@ export default function App() {
                   <strong className="font-bold text-[#6D28D9]">🔎 US vs. Global Timing Insight: </strong>
                   {usActivity.key_insight}
                 </div>
+
+                {/* Real Top Countries & Demographics from @techfairyanna Instagram Insights */}
+                {usActivity.top_countries && (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div className="p-4 rounded-2xl bg-[#F5EEFF] border-2 border-[#19154E] space-y-2">
+                      <div className="text-xs font-extrabold uppercase text-[#19154E]">
+                        🌍 Top Follower Countries (Instagram Insights)
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        {usActivity.top_countries.map((c) => (
+                          <div
+                            key={c.country}
+                            className={`p-2.5 rounded-xl border border-[#19154E] flex items-center justify-between text-xs font-bold ${
+                              c.country.includes('United States')
+                                ? 'bg-[#C8F904] text-[#19154E]'
+                                : 'bg-white text-[#19154E]'
+                            }`}
+                          >
+                            <span>
+                              {c.flag} {c.country}
+                            </span>
+                            <span>{c.share_pct}%</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="p-4 rounded-2xl bg-[#FFFDF9] border-2 border-[#19154E] space-y-2">
+                      <div className="text-xs font-extrabold uppercase text-[#19154E]">
+                        👥 Follower Age &amp; Gender Split (16.9K Followers)
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2 text-xs font-bold">
+                        {(usActivity.age_ranges || []).slice(0, 4).map((a) => (
+                          <span
+                            key={a.range}
+                            className="px-2.5 py-1 rounded-xl bg-white border border-[#19154E] text-[#19154E]"
+                          >
+                            Age {a.range}: <strong className="text-[#6D28D9]">{a.pct}%</strong>
+                          </span>
+                        ))}
+                        {usActivity.gender_split && (
+                          <span className="px-2.5 py-1 rounded-xl bg-[#FF7EB6] border border-[#19154E] text-[#19154E]">
+                            Men {usActivity.gender_split.men_pct}% • Women {usActivity.gender_split.women_pct}%
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
 
                 {/* Hourly EST Bar Comparison: US Active % vs Global Active % */}
                 <div className="space-y-3">
