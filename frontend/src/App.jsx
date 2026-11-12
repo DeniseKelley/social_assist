@@ -249,6 +249,9 @@ export default function App() {
           sessionStorage.setItem('sa_authenticated', 'true');
           setIsAuthenticated(true);
           setLoginError('');
+          if (window.location.hash.includes('access_token') || window.location.search.includes('code=')) {
+            window.history.replaceState({}, document.title, `${window.location.origin}${window.location.pathname}`);
+          }
         } else {
           setLoginError(
             `Signed in as ${email}, which is not authorized for @techfairyanna's private studio.`
@@ -571,7 +574,7 @@ export default function App() {
 
   const handleGoogleSignIn = async () => {
     setLoginError('');
-    const redirectUrl = window.location.href.split('#')[0];
+    const redirectUrl = `${window.location.origin}${window.location.pathname}`;
     const { error } = await supabase.auth.signInWithOAuth({
       provider: 'google',
       options: { redirectTo: redirectUrl },
