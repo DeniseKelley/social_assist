@@ -153,36 +153,24 @@ export default function App() {
 
   const getWorkspaceScope = (emailOverride) => {
     const raw = (emailOverride ?? currentUserEmail ?? sessionStorage.getItem('sa_user_email') ?? '').trim().toLowerCase();
-    return raw || 'techfairyanna';
+    return raw || 'guest';
   };
 
-  const isAnnaOwner = (emailOverride) => {
-    const scope = getWorkspaceScope(emailOverride);
-    return scope === 'techfairyanna' || isSuperuserEmail(scope);
-  };
+  const isAnnaOwner = () => false;
 
-  const scopedKey = (base, emailOverride) => `${base}:${getWorkspaceScope(emailOverride)}`;
+  const scopedKey = (base, emailOverride) => `${base}_v2:${getWorkspaceScope(emailOverride)}`;
 
   const fetchLiveInstagramAnalytics = async ({
     forceRefresh = false,
     overrideHandle = '',
     emailOverride,
   } = {}) => {
-    const connStr =
-      localStorage.getItem(scopedKey('sa_connection', emailOverride)) ||
-      (isAnnaOwner(emailOverride) ? localStorage.getItem('sa_connection') : null) ||
-      'null';
+    const connStr = localStorage.getItem(scopedKey('sa_connection', emailOverride)) || 'null';
     const savedConn = JSON.parse(connStr);
-    const savedToken =
-      localStorage.getItem(scopedKey('sa_ig_access_token', emailOverride)) ||
-      (isAnnaOwner(emailOverride) ? localStorage.getItem('sa_ig_access_token') : '') ||
-      '';
-    const defaultHandle = isAnnaOwner(emailOverride) ? 'techfairyanna' : '';
-    const targetHandle = (
-      overrideHandle ||
-      savedConn?.instagram_handle ||
-      defaultHandle
-    ).replace(/^@/, '').trim();
+    const savedToken = localStorage.getItem(scopedKey('sa_ig_access_token', emailOverride)) || '';
+    const targetHandle = (overrideHandle || savedConn?.instagram_handle || '')
+      .replace(/^@/, '')
+      .trim();
 
     if (!targetHandle) {
       setAnalyticsData(EMPTY_WORKSPACE_ANALYTICS);
@@ -216,67 +204,43 @@ export default function App() {
   };
 
   const fetchAll = async (emailOverride) => {
-    // Purge legacy static cache keys so stale hardcoded snapshots never persist
+    // Purge legacy pre-connected cache keys so a fresh Google sign-in NEVER inherits @techfairyanna automatically
     localStorage.removeItem('sa_analytics');
     localStorage.removeItem('sa_analytics_v4_real');
     localStorage.removeItem('sa_analytics_v5_live');
+    localStorage.removeItem('sa_connection');
+    localStorage.removeItem('sa_ig_access_token');
 
-    const annaWorkspace = isAnnaOwner(emailOverride);
-    let resolvedHandle = annaWorkspace ? 'techfairyanna' : '';
+    const rawConn = localStorage.getItem(scopedKey('sa_connection', emailOverride));
+    const savedToken = localStorage.getItem(scopedKey('sa_ig_access_token', emailOverride)) || '';
+    const savedConn = JSON.parse(rawConn || 'null') || {
+      instagram_handle: '',
+      has_access_token: Boolean(savedToken),
+      webhook_verify_token: 'social_assist_verify_token',
+    };
 
-    try {
-      if (!annaWorkspace) {
-        throw new Error('Isolated per-user workspace');
-      }
-      const [connResp, autoResp] = await Promise.all([
-        fetch('/api/connection'),
-        fetch('/api/automations'),
-      ]);
-      if (!connResp.ok || !autoResp.ok) {
-        throw new Error('Serverless / static automation store');
-      }
-      const [connRes, autoRes] = await Promise.all([connResp.json(), autoResp.json()]);
-      resolvedHandle = (connRes.instagram_handle || 'techfairyanna').replace(/^@/, '');
-      setConnection(connRes);
-      setHandleInput(resolvedHandle ? `https://www.instagram.com/${resolvedHandle}/` : '');
-      setAppIdInput(connRes.app_id || '');
-      setAutomations(autoRes.automations || []);
-      setLogs(autoRes.recent_logs || []);
-    } catch {
-      const rawFlows =
-        localStorage.getItem(scopedKey('sa_automations', emailOverride)) ||
-        (annaWorkspace ? localStorage.getItem('sa_automations') : null);
-      const savedFlows = JSON.parse(rawFlows || 'null') || (annaWorkspace ? INITIAL_AUTOMATIONS : []);
+    const resolvedHandle = (savedConn.instagram_handle || '').replace(/^@/, '').trim();
+    const rawFlows = localStorage.getItem(scopedKey('sa_automations', emailOverride));
+    const savedFlows =
+      JSON.parse(rawFlows || 'null') ||
+      (resolvedHandle.toLowerCase() === 'techfairyanna' ? INITIAL_AUTOMATIONS : []);
+    const savedLogs = JSON.parse(
+      localStorage.getItem(scopedKey('sa_logs', emailOverride)) || '[]'
+    );
 
-      const rawLogs =
-        localStorage.getItem(scopedKey('sa_logs', emailOverride)) ||
-        (annaWorkspace ? localStorage.getItem('sa_logs') : null);
-      const savedLogs = JSON.parse(rawLogs || '[]');
+    setConnection(savedConn);
+    setHandleInput(resolvedHandle ? `https://www.instagram.com/${resolvedHandle}/` : '');
+    setAutomations(savedFlows);
+    setLogs(savedLogs);
 
-      const rawConn =
-        localStorage.getItem(scopedKey('sa_connection', emailOverride)) ||
-        (annaWorkspace ? localStorage.getItem('sa_connection') : null);
-      const savedToken =
-        localStorage.getItem(scopedKey('sa_ig_access_token', emailOverride)) ||
-        (annaWorkspace ? localStorage.getItem('sa_ig_access_token') : '');
-
-      const savedConn = JSON.parse(rawConn || 'null') || {
-        instagram_handle: annaWorkspace ? 'techfairyanna' : '',
-        has_access_token: Boolean(savedToken),
-        webhook_verify_token: 'social_assist_verify_token',
-      };
-      resolvedHandle = (savedConn.instagram_handle || '').replace(/^@/, '').trim();
-      setConnection(savedConn);
-      setHandleInput(resolvedHandle ? `https://www.instagram.com/${resolvedHandle}/` : '');
-      setAutomations(savedFlows);
-      setLogs(savedLogs);
-
-      if (!resolvedHandle && !annaWorkspace) {
-        setActiveTab('connect');
-      }
+    if (!resolvedHandle) {
+      setActiveTab('connect');
+      setAnalyticsData(EMPTY_WORKSPACE_ANALYTICS);
+      setOpenclawOutput(runLocalOpenClawAnalysis(openclawPrompt, EMPTY_WORKSPACE_ANALYTICS));
+      setLoading(false);
+      return;
     }
 
-    // 2. Always fetch live Instagram stats independently from `/api/analytics`
     try {
       await fetchLiveInstagramAnalytics({
         forceRefresh: false,
@@ -284,7 +248,12 @@ export default function App() {
         emailOverride,
       });
     } catch {
-      setAnalyticsData((prev) => prev || (annaWorkspace ? INITIAL_ANALYTICS : EMPTY_WORKSPACE_ANALYTICS));
+      setAnalyticsData((prev) =>
+        prev ||
+        (resolvedHandle.toLowerCase() === 'techfairyanna'
+          ? INITIAL_ANALYTICS
+          : EMPTY_WORKSPACE_ANALYTICS)
+      );
     } finally {
       setLoading(false);
     }
@@ -466,6 +435,21 @@ export default function App() {
     } finally {
       setSyncing(false);
     }
+  };
+
+  const handleDisconnectInstagram = () => {
+    localStorage.removeItem(scopedKey('sa_connection'));
+    localStorage.removeItem(scopedKey('sa_ig_access_token'));
+    setConnection({ instagram_handle: '', has_access_token: false });
+    setHandleInput('');
+    setTokenInput('');
+    setAnalyticsData(EMPTY_WORKSPACE_ANALYTICS);
+    setOpenclawOutput(runLocalOpenClawAnalysis(openclawPrompt, EMPTY_WORKSPACE_ANALYTICS));
+    setConnectStatusMsg({
+      type: 'success',
+      text: 'Disconnected Instagram account from this Google profile.',
+    });
+    showToast('Instagram account disconnected');
   };
 
   const handleOAuthPopup = () => {
@@ -1181,7 +1165,7 @@ export default function App() {
                 <span className="font-mono-code font-bold px-2 py-0.5 rounded bg-white border border-[#19154E]">
                   CODE
                 </span>{' '}
-                on <strong>@{profile.username}</strong>, our cartoon courier replies in the comments and
+                on <strong>{profile.username ? `@${profile.username}` : 'your Instagram account'}</strong>, our cartoon courier replies in the comments and
                 drops your link straight into their DMs.
               </p>
 
@@ -2769,6 +2753,18 @@ export default function App() {
                     <span>Connect &amp; Sign In on IG ↗</span>
                   </button>
                 </div>
+
+                {profile.username && (
+                  <div className="pt-1 flex justify-end">
+                    <button
+                      type="button"
+                      onClick={handleDisconnectInstagram}
+                      className="text-xs font-bold text-neutral-500 hover:text-rose-600 underline"
+                    >
+                      Disconnect @{profile.username} from this Google profile
+                    </button>
+                  </div>
+                )}
               </form>
 
               {/* Optional Collapsed Advanced Section (Hidden by Default) */}
