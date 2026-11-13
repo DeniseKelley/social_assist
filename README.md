@@ -1,10 +1,10 @@
-# SocialAssist — Instagram Automated DM & Strategy Studio (`@techfairyanna`)
+# SocialAssist — Creator Instagram Automated DM & Strategy Studio
 
 A ManyChat-style Instagram Automated DM studio + Instagram Analytics & AI Strategy engine built with **Python (FastAPI)** and **React (Vite + Tailwind CSS)**.
 
 ## Features
 - **ManyChat-Style Automated DM Studio**: Comment-to-DM keyword flows, Story Reply triggers, Direct DM keyword auto-replies, public comment auto-replies, and a live mobile DM simulator.
-- **Built-in Instagram Connection Wizard**: Connect via 1-Click Instagram OAuth popup or single Access Token paste (auto-discovers Account ID, profile metrics, and media).
+- **1-Step Instagram Connection**: Connect your Instagram account and pull live profile & Reel metrics into your isolated workspace.
 - **Instagram Statistics & AI Strategy Engine**: Tracks engagement rates, save-to-view ratios, comment lift multiplier, and generates actionable content & DM trigger strategies.
 
 ## Quick Start

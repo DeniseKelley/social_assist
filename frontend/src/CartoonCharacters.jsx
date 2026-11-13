@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
 
 /**
- * 1. TechFairyCharacter ("Fairy Anna" — Animated Cartoon Fae in Lilac Window)
- * Uses /mnt/d/annayoutubefiles/Fae/fae_window.PNG with 4x supersampled LANCZOS frames:
+ * 1. TechFairyCharacter (Animated Studio Fae Mascot in Lilac Window)
+ * Uses 4x supersampled LANCZOS frames:
  * - fae_window_base.png: Base frame leaning in the lilac arched window holding her star wand
  * - fae_window_blink.png: Natural periodic blinking frame
  * - fae_window_sparkle.png: Twinkling star wand glow frame

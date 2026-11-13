@@ -98,7 +98,7 @@ export default function App() {
     public_comment_reply: 'Just sent it to your DMs! Check your message requests ✨🧚‍♀️',
     dm_message: 'Hey! 👋 Thanks for commenting! Tap the button below to grab the resource:',
     dm_button_text: 'Open Resource ✨',
-    dm_button_url: 'https://labfae.com',
+    dm_button_url: 'https://example.com',
   });
 
   // Live Simulator state
@@ -173,8 +173,6 @@ export default function App() {
     return raw || 'guest';
   };
 
-  const isAnnaOwner = () => false;
-
   const scopedKey = (base, emailOverride) => `${base}_v2:${getWorkspaceScope(emailOverride)}`;
 
   const fetchLiveInstagramAnalytics = async ({
@@ -221,7 +219,7 @@ export default function App() {
   };
 
   const fetchAll = async (emailOverride) => {
-    // Purge legacy pre-connected cache keys so a fresh Google sign-in NEVER inherits @techfairyanna automatically
+    // Purge legacy un-scoped cache keys so every user starts with a clean isolated workspace
     localStorage.removeItem('sa_analytics');
     localStorage.removeItem('sa_analytics_v4_real');
     localStorage.removeItem('sa_analytics_v5_live');
@@ -238,9 +236,7 @@ export default function App() {
 
     const resolvedHandle = (savedConn.instagram_handle || '').replace(/^@/, '').trim();
     const rawFlows = localStorage.getItem(scopedKey('sa_automations', emailOverride));
-    const savedFlows =
-      JSON.parse(rawFlows || 'null') ||
-      (resolvedHandle.toLowerCase() === 'techfairyanna' ? INITIAL_AUTOMATIONS : []);
+    const savedFlows = JSON.parse(rawFlows || 'null') || INITIAL_AUTOMATIONS;
     const savedLogs = JSON.parse(
       localStorage.getItem(scopedKey('sa_logs', emailOverride)) || '[]'
     );
@@ -265,12 +261,7 @@ export default function App() {
         emailOverride,
       });
     } catch {
-      setAnalyticsData((prev) =>
-        prev ||
-        (resolvedHandle.toLowerCase() === 'techfairyanna'
-          ? INITIAL_ANALYTICS
-          : EMPTY_WORKSPACE_ANALYTICS)
-      );
+      setAnalyticsData((prev) => prev || EMPTY_WORKSPACE_ANALYTICS);
     } finally {
       setLoading(false);
     }
@@ -487,14 +478,18 @@ export default function App() {
     return s.replace(/^@/, '').replace(/^\/+|\/+$/g, '');
   };
 
-  const handleLinkConnectAndRedirect = async (e) => {
+  const handleConnectAndRedirect = async (e) => {
     if (e) e.preventDefault();
     const extracted = extractHandleFromLink(handleInput);
     if (!extracted) {
-      showToast('Enter an Instagram @handle or profile link first!', 'error');
+      setConnectStatusMsg({
+        type: 'error',
+        text: 'Please enter your Instagram @handle or profile link first.',
+      });
+      showToast('Enter your Instagram @handle or profile link first!', 'error');
       return;
     }
-    // Open Instagram login / profile authorization window immediately on user click
+    // Open Instagram login / profile authorization window immediately on the user's click gesture
     const targetUrl =
       connection?.oauth_login_url ||
       `https://www.instagram.com/accounts/login/?next=%2F${encodeURIComponent(extracted)}%2F`;
@@ -506,94 +501,71 @@ export default function App() {
     if (e) e.preventDefault();
     const cleanHandle = overrideHandle || extractHandleFromLink(handleInput);
     if (!cleanHandle && !(tokenInput && tokenInput.trim())) {
-      setConnectStatusMsg({ type: 'error', text: 'Please enter an Instagram @handle, profile URL, or Graph API token.' });
+      setConnectStatusMsg({
+        type: 'error',
+        text: 'Please enter an Instagram @handle, profile URL, or Graph API token.',
+      });
       return;
     }
     setSyncing(true);
     setConnectStatusMsg(null);
     try {
-      if (!isAnnaOwner()) {
-        throw new Error('Serverless per-user workspace');
-      }
-      const res = await fetch('/api/connection/connect', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          instagram_handle: cleanHandle,
-          access_token: tokenInput || undefined,
-          app_id: appIdInput || undefined,
-          app_secret: appSecretInput || undefined,
-        }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setConnectStatusMsg({ type: 'success', text: data.message });
-        showToast(data.message);
-        setTokenInput('');
-        triggerFairyWand();
-        await fetchAll();
-        return;
-      }
-      throw new Error('Serverless mode connect');
-    } catch {
-      try {
-        if (tokenInput && tokenInput.trim()) {
-          const cleanToken = tokenInput.trim();
-          const verifyResp = await fetch(
-            `/api/analytics?handle=${encodeURIComponent(cleanHandle || 'me')}&refresh=true&strict_token=true`,
-            {
-              headers: { Authorization: `Bearer ${cleanToken}` },
-              cache: 'no-store',
-            }
-          );
-          if (!verifyResp.ok) {
-            const errJson = await verifyResp.json().catch(() => ({}));
-            throw new Error(errJson.error || 'Invalid Instagram Graph API token');
+      if (tokenInput && tokenInput.trim()) {
+        const cleanToken = tokenInput.trim();
+        const verifyResp = await fetch(
+          `/api/analytics?handle=${encodeURIComponent(cleanHandle || 'me')}&refresh=true&strict_token=true`,
+          {
+            headers: { Authorization: `Bearer ${cleanToken}` },
+            cache: 'no-store',
           }
-          const liveAna = await verifyResp.json();
-          const finalHandle = liveAna.profile?.username || cleanHandle;
-          localStorage.setItem(scopedKey('sa_ig_access_token'), cleanToken);
-          const updatedConn = {
-            instagram_handle: finalHandle,
-            has_access_token: true,
-            account_id: liveAna.profile?.account_id || '',
-            webhook_verify_token: 'social_assist_verify_token',
-          };
-          localStorage.setItem(scopedKey('sa_connection'), JSON.stringify(updatedConn));
-          setConnection(updatedConn);
-          setHandleInput(`https://www.instagram.com/${finalHandle}/`);
-          setAnalyticsData(liveAna);
-          setOpenclawOutput(runLocalOpenClawAnalysis(openclawPrompt, liveAna));
-          setConnectStatusMsg({
-            type: 'success',
-            text: `Connected @${finalHandle} via Official Instagram Graph API (live metrics synced)!`,
-          });
-          showToast(`Connected @${finalHandle} via Graph API!`);
-          setTokenInput('');
-          setActiveTab('analytics');
-          triggerFairyWand();
-        } else {
-          const updatedConn = {
-            instagram_handle: cleanHandle,
-            has_access_token: Boolean(localStorage.getItem(scopedKey('sa_ig_access_token'))),
-            webhook_verify_token: 'social_assist_verify_token',
-          };
-          localStorage.setItem(scopedKey('sa_connection'), JSON.stringify(updatedConn));
-          setConnection(updatedConn);
-          setHandleInput(`https://www.instagram.com/${cleanHandle}/`);
-          await fetchLiveInstagramAnalytics({ forceRefresh: true, overrideHandle: cleanHandle });
-          setConnectStatusMsg({
-            type: 'success',
-            text: `Connected & synced live Instagram stats for @${cleanHandle}!`,
-          });
-          showToast(`Synced live stats for @${cleanHandle}!`);
-          setActiveTab('analytics');
-          triggerFairyWand();
+        );
+        if (!verifyResp.ok) {
+          const errJson = await verifyResp.json().catch(() => ({}));
+          throw new Error(errJson.error || 'Invalid Instagram Graph API token');
         }
-      } catch (innerErr) {
-        setConnectStatusMsg({ type: 'error', text: innerErr.message });
-        showToast(innerErr.message, 'error');
+        const liveAna = await verifyResp.json();
+        const finalHandle = liveAna.profile?.username || cleanHandle;
+        localStorage.setItem(scopedKey('sa_ig_access_token'), cleanToken);
+        const updatedConn = {
+          instagram_handle: finalHandle,
+          has_access_token: true,
+          account_id: liveAna.profile?.account_id || '',
+          webhook_verify_token: 'social_assist_verify_token',
+        };
+        localStorage.setItem(scopedKey('sa_connection'), JSON.stringify(updatedConn));
+        setConnection(updatedConn);
+        setHandleInput(`https://www.instagram.com/${finalHandle}/`);
+        setAnalyticsData(liveAna);
+        setOpenclawOutput(runLocalOpenClawAnalysis(openclawPrompt, liveAna));
+        setConnectStatusMsg({
+          type: 'success',
+          text: `Connected @${finalHandle} via Official Instagram Graph API (live metrics synced)!`,
+        });
+        showToast(`Connected @${finalHandle} via Graph API!`);
+        setTokenInput('');
+        setActiveTab('analytics');
+        triggerFairyWand();
+      } else {
+        const updatedConn = {
+          instagram_handle: cleanHandle,
+          has_access_token: Boolean(localStorage.getItem(scopedKey('sa_ig_access_token'))),
+          webhook_verify_token: 'social_assist_verify_token',
+        };
+        localStorage.setItem(scopedKey('sa_connection'), JSON.stringify(updatedConn));
+        setConnection(updatedConn);
+        setHandleInput(`https://www.instagram.com/${cleanHandle}/`);
+        await fetchLiveInstagramAnalytics({ forceRefresh: true, overrideHandle: cleanHandle });
+        setConnectStatusMsg({
+          type: 'success',
+          text: `Redirected to Instagram & synced live stats for @${cleanHandle}!`,
+        });
+        showToast(`Connected & pulled live stats for @${cleanHandle}!`);
+        setActiveTab('analytics');
+        triggerFairyWand();
       }
+    } catch (innerErr) {
+      setConnectStatusMsg({ type: 'error', text: innerErr.message });
+      showToast(innerErr.message, 'error');
     } finally {
       setSyncing(false);
     }
@@ -609,17 +581,9 @@ export default function App() {
     setOpenclawOutput(runLocalOpenClawAnalysis(openclawPrompt, EMPTY_WORKSPACE_ANALYTICS));
     setConnectStatusMsg({
       type: 'success',
-      text: 'Disconnected Instagram account from this Google profile.',
+      text: 'Disconnected Instagram account from your workspace.',
     });
     showToast('Instagram account disconnected');
-  };
-
-  const handleOAuthPopup = () => {
-    if (!connection?.oauth_login_url) {
-      showToast('Save your Meta App ID & Secret first to enable the 1-Click OAuth popup!', 'error');
-      return;
-    }
-    window.open(connection.oauth_login_url, 'ig_oauth', 'width=620,height=720');
   };
 
   const handleCreateFlow = async (e) => {
@@ -628,26 +592,6 @@ export default function App() {
       .split(',')
       .map((k) => k.trim().toUpperCase())
       .filter(Boolean);
-    try {
-      const res = await fetch('/api/automations', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ...newFlow,
-          keywords: keywordsList,
-          active: true,
-        }),
-      });
-      if (res.ok) {
-        showToast(`Created automation "${newFlow.name}"!`);
-        setShowNewFlow(false);
-        triggerFairyWand();
-        await fetchAll();
-        return;
-      }
-    } catch {
-      // Static fallback
-    }
     const created = {
       id: `flow-${Date.now()}`,
       ...newFlow,
@@ -664,17 +608,6 @@ export default function App() {
   };
 
   const handleToggleFlow = async (id) => {
-    try {
-      if (!isAnnaOwner()) throw new Error('Per-user store');
-      const res = await fetch(`/api/automations/${id}/toggle`, { method: 'PATCH' });
-      if (res.ok) {
-        triggerFairyWand();
-        await fetchAll();
-        return;
-      }
-    } catch {
-      // Static fallback
-    }
     const next = automations.map((f) => (f.id === id ? { ...f, active: !f.active } : f));
     setAutomations(next);
     localStorage.setItem(scopedKey('sa_automations'), JSON.stringify(next));
@@ -682,17 +615,6 @@ export default function App() {
   };
 
   const handleDeleteFlow = async (id) => {
-    try {
-      if (!isAnnaOwner()) throw new Error('Per-user store');
-      const res = await fetch(`/api/automations/${id}`, { method: 'DELETE' });
-      if (res.ok) {
-        showToast('Automation deleted');
-        await fetchAll();
-        return;
-      }
-    } catch {
-      // Static fallback
-    }
     const next = automations.filter((f) => f.id !== id);
     setAutomations(next);
     localStorage.setItem(scopedKey('sa_automations'), JSON.stringify(next));
@@ -702,26 +624,6 @@ export default function App() {
   const handleSimulate = async (e) => {
     if (e) e.preventDefault();
     triggerFairyWand();
-    try {
-      if (!isAnnaOwner()) throw new Error('Per-user store');
-      const res = await fetch('/api/automations/simulate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          event_type: simType,
-          sender_username: simUser,
-          text: simText,
-        }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setSimResult(data);
-        await fetchAll();
-        return;
-      }
-    } catch {
-      // Static fallback simulator
-    }
     const expectedTrigger =
       simType === 'comment'
         ? 'comment_keyword'
@@ -1622,7 +1524,7 @@ export default function App() {
     );
   }
 
-  const baseFallback = isAnnaOwner() ? INITIAL_ANALYTICS : EMPTY_WORKSPACE_ANALYTICS;
+  const baseFallback = EMPTY_WORKSPACE_ANALYTICS;
   const isUnconnected = analyticsData?.source === 'unconnected_workspace';
   const profile = analyticsData?.profile || baseFallback.profile;
   const summary = {
@@ -1638,13 +1540,9 @@ export default function App() {
     ? analyticsData.posts
     : baseFallback.posts;
   const posts = rawPosts.map((p) => {
-    const fallbackMatch =
-      String(profile.username || '').toLowerCase() === 'techfairyanna'
-        ? INITIAL_ANALYTICS.posts.find((fp) => fp.id === p.id) || {}
-        : {};
-    const views = typeof p.views === 'number' ? p.views : fallbackMatch.views || 0;
-    const likes = typeof p.likes === 'number' ? p.likes : fallbackMatch.likes || 0;
-    const comments = typeof p.comments === 'number' ? p.comments : fallbackMatch.comments || 0;
+    const views = typeof p.views === 'number' ? p.views : 0;
+    const likes = typeof p.likes === 'number' ? p.likes : 0;
+    const comments = typeof p.comments === 'number' ? p.comments : 0;
     const saves = typeof p.saves === 'number' ? p.saves : null;
     const shares = typeof p.shares === 'number' ? p.shares : null;
     const followersGained =
@@ -1656,7 +1554,6 @@ export default function App() {
         ? Number((((likes + comments + (saves || 0) + (shares || 0)) / views) * 100).toFixed(2))
         : 0;
     return {
-      ...fallbackMatch,
       ...p,
       views,
       likes,
@@ -1669,14 +1566,12 @@ export default function App() {
           ? Number(((followersGained / views) * 100).toFixed(2))
           : null,
       engagement_rate: engagementRate,
-      title: p.title || fallbackMatch.title || (p.caption || '').split('\n')[0].slice(0, 68) || 'Instagram Reel',
-      published_label: p.published_label || fallbackMatch.published_label || 'Reel',
-      thumbnail_url: p.thumbnail_url || fallbackMatch.thumbnail_url || './reels/live_DeK6AFYOvNO.png',
-      fallback_thumbnail_url:
-        p.fallback_thumbnail_url || fallbackMatch.fallback_thumbnail_url || './reels/live_DeK6AFYOvNO.png',
+      title: p.title || (p.caption || '').split('\n')[0].slice(0, 68) || 'Instagram Reel',
+      published_label: p.published_label || 'Reel',
+      thumbnail_url: p.thumbnail_url || '',
+      fallback_thumbnail_url: p.fallback_thumbnail_url || '',
       video_summary_text:
         p.video_summary_text ||
-        fallbackMatch.video_summary_text ||
         `CAPTION: ${(p.caption || '').slice(0, 140)} | LIVE METRICS: ${views.toLocaleString()} views, ${likes.toLocaleString()} likes, ${comments.toLocaleString()} comments (${engagementRate}% engagement rate).`,
     };
   });
@@ -1710,7 +1605,6 @@ export default function App() {
         second: '2-digit',
       })
     : null;
-  const estimatedUsFollowers = Math.round((profile.followers_count || 0) * 0.068);
 
   const usActivity =
     analyticsData?.analysis?.us_audience_activity || INITIAL_ANALYTICS.analysis.us_audience_activity;
@@ -1918,11 +1812,11 @@ export default function App() {
               </div>
             </div>
 
-            {/* Animated Cartoon Character ("Fairy Anna") */}
+            {/* Animated Studio Mascot */}
             <div className="lg:col-span-4 flex flex-col items-center justify-center">
               <div
                 onClick={triggerFairyWand}
-                title="Click Fairy Anna to cast a DM spell!"
+                title="Click mascot to cast a DM spell!"
                 className="w-60 h-60 sm:w-64 sm:h-64 cursor-pointer"
               >
                 <TechFairyCharacter
@@ -1931,7 +1825,7 @@ export default function App() {
                 />
               </div>
               <span className="text-[11px] font-bold text-neutral-500 uppercase tracking-wider">
-                ↑ Click Fairy Anna or test a trigger below!
+                ↑ Click studio mascot or test a trigger below!
               </span>
             </div>
           </div>
@@ -2075,7 +1969,7 @@ export default function App() {
                       </label>
                       <input
                         type="url"
-                        placeholder="https://labfae.com"
+                        placeholder="https://example.com"
                         value={newFlow.dm_button_url}
                         onChange={(e) => setNewFlow({ ...newFlow, dm_button_url: e.target.value })}
                         className="w-full px-3.5 py-2.5 rounded-xl bg-[#FFF8FC] border-2 border-[#19154E] text-sm font-medium focus:outline-none focus:bg-white"
@@ -2140,7 +2034,9 @@ export default function App() {
                                     ? 'story_reply'
                                     : 'dm'
                                 );
-                                setSimText(`OMG @techfairyanna can you send me ${kw} please?! ✨`);
+                                setSimText(
+                                  `Can you send me ${kw} please?! ✨`
+                                );
                                 triggerFairyWand();
                               }}
                               title="Click to load this keyword into the simulator"
@@ -2299,7 +2195,7 @@ export default function App() {
 
                   {!simResult ? (
                     <div className="py-7 text-center text-xs text-neutral-400">
-                      Click <strong>Fire Test</strong> above to watch Fairy Anna reply in the comments & send the DM card!
+                      Click <strong>Fire Test</strong> above to watch SocialAssist reply in the comments &amp; send the DM card!
                     </div>
                   ) : !simResult.matched ? (
                     <div className="p-3 rounded-2xl bg-[#FF7EB6]/20 border border-[#FF7EB6] text-xs text-[#B799E8] font-semibold">
@@ -2399,7 +2295,7 @@ export default function App() {
               <div className="lg:col-span-8 space-y-3">
                 <div className="flex flex-wrap items-center gap-2">
                   <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-[#EDE9FE] border-2 border-[#19154E] text-xs font-bold text-[#6D28D9]">
-                    <span>🔭 @{profile.username || 'techfairyanna'} Live Instagram Telemetry</span>
+                    <span>🔭 @{profile.username || 'your_account'} Live Instagram Telemetry</span>
                   </div>
                   <div
                     className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full border-2 border-[#19154E] text-xs font-bold ${
@@ -2431,7 +2327,7 @@ export default function App() {
                 </h3>
                 <p className="text-xs sm:text-sm text-neutral-700 leading-relaxed">
                   Pulling real-time follower counts, post counts, and per-Reel views, likes, comments,
-                  and engagement rates directly from <strong>@{profile.username || 'techfairyanna'}</strong> on Instagram.
+                  and engagement rates directly from <strong>@{profile.username || 'your_account'}</strong> on Instagram.
                   Auto-refreshes every 90s or click <strong>Sync Live Instagram Metrics</strong> anytime.
                 </p>
                 <div className="pt-1 flex flex-wrap items-center gap-2.5">
@@ -2557,7 +2453,7 @@ export default function App() {
                     <span>🎬 Live Instagram Reels Performance &amp; Agent Text Summaries</span>
                   </div>
                   <h3 className="font-display font-bold text-lg sm:text-xl text-[#19154E]">
-                    Live Reels on @{profile.username || 'techfairyanna'} (Direct from Instagram)
+                    Live Reels on @{profile.username || 'your_account'} (Direct from Instagram)
                   </h3>
                   <p className="text-xs font-medium text-neutral-700">
                     Live views, likes, comments, and engagement rates pulled directly from Instagram, paired with structured summaries for OpenClaw.
@@ -2831,11 +2727,12 @@ export default function App() {
                     <span>🇺🇸 Goal #3: United States Audience Activity (Isolated from Global)</span>
                   </div>
                   <h3 className="font-display font-bold text-lg sm:text-xl text-[#19154E]">
-                    When Your United States Followers Are Most Active (EST)
+                    When United States Followers Are Most Active (EST)
                   </h3>
                   <p className="text-xs font-medium text-neutral-700">
-                    <strong>{usActivity.us_audience_share_pct}%</strong> (~{estimatedUsFollowers.toLocaleString()} engineers) of @{profile.username || 'techfairyanna'}&apos;s{' '}
-                    <strong>{(profile.followers_count || 0).toLocaleString()}</strong> live audience is in the United States (#2 Country after India 24.9%).
+                    Peak US East &amp; West Coast scroll windows benchmarked for{' '}
+                    <strong>@{profile.username || 'your_account'}</strong> (
+                    <strong>{(profile.followers_count || 0).toLocaleString()}</strong> live followers).
                   </p>
                 </div>
                 <div className="flex items-center gap-3 text-xs font-bold">
@@ -2857,7 +2754,7 @@ export default function App() {
                   {usActivity.key_insight}
                 </div>
 
-                {/* Real Top Countries & Demographics from @techfairyanna Instagram Insights */}
+                {/* Optional Audience Demographics (Shown only when user connects their own Insights token) */}
                 {usActivity.top_countries && (
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div className="p-4 rounded-2xl bg-[#F5EEFF] border-2 border-[#19154E] space-y-2">
@@ -3179,7 +3076,7 @@ export default function App() {
                     <span className="text-xs font-bold text-[#19154E]">Quick Agent Tasks:</span>
                     {[
                       'Compare my top 3 live Reels by Views & Engagement Rate and write 3 new Reel scripts',
-                      'Why did my sudo rm -rf / Reel and Network Down Panic Reel break out on Reels Explore?',
+                      'Why did my #1 live Reel outperform my account average, and how do I build a Part 2 sequel?',
                       'Build a 7-day US Audience posting schedule (EST & PST) from my live Reel stats',
                     ].map((preset) => (
                       <button
@@ -3319,7 +3216,7 @@ export default function App() {
                   Next 3 High-Converting Reel Ideas + Paired ManyChat Keywords
                 </h4>
                 <p className="text-xs font-medium text-neutral-700">
-                  Tailored for @techfairyanna&apos;s AI, coding, and creative tech audience:
+                  Tailored for @{profile.username || 'your_account'}&apos;s live audience and content pillars:
                 </p>
               </div>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -3390,7 +3287,9 @@ export default function App() {
                       : 'Connect Your Instagram Account'}
                   </h3>
                   <p className="text-xs sm:text-sm text-neutral-700 font-medium">
-                    Paste any Instagram <strong>@handle</strong> or profile link below to attach it to this Google login and pull live followers, posts, and Reel metrics.
+                    Enter your Instagram <strong>@handle</strong> or profile link below and click{' '}
+                    <strong>Connect to Instagram</strong> to sign in on Instagram and pull your live
+                    followers, posts, and Reel stats into your private workspace.
                   </p>
                 </div>
                 <div className="md:col-span-4 flex justify-center">
@@ -3412,8 +3311,8 @@ export default function App() {
                 </div>
               )}
 
-              {/* Primary 1-Click Link + Sync / Redirect Form */}
-              <form onSubmit={handleConnectSubmit} className="space-y-4">
+              {/* Single Unified Connect & Redirect Form */}
+              <form onSubmit={handleConnectAndRedirect} className="space-y-4">
                 <div className="p-5 rounded-2xl bg-[#FFF8FC] border-2 border-[#19154E] space-y-3">
                   <label className="block text-sm font-display font-bold text-[#19154E]">
                     Instagram Profile Link or @Username
@@ -3421,6 +3320,7 @@ export default function App() {
                   <input
                     type="text"
                     required
+                    data-testid="ig-handle-input"
                     value={handleInput}
                     onChange={(e) => setHandleInput(e.target.value)}
                     placeholder="https://www.instagram.com/your_handle/ or @your_handle"
@@ -3431,35 +3331,29 @@ export default function App() {
                     <strong className="font-mono-code text-[#6D28D9]">
                       {extractHandleFromLink(handleInput)
                         ? `@${extractHandleFromLink(handleInput)}`
-                        : 'Enter an Instagram handle above'}
+                        : 'Enter your Instagram handle above'}
                     </strong>
                   </p>
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <button
-                    type="submit"
-                    disabled={syncing}
-                    className="w-full editorial-btn py-3.5 px-5 rounded-2xl bg-[#C8F904] text-[#19154E] font-display font-bold text-sm sm:text-base flex items-center justify-center gap-2"
-                  >
-                    {syncing ? (
+                <button
+                  type="submit"
+                  disabled={syncing}
+                  data-testid="single-connect-ig-btn"
+                  className="w-full editorial-btn py-4 px-6 rounded-2xl bg-[#C8F904] text-[#19154E] font-display font-bold text-sm sm:text-base flex items-center justify-center gap-2.5"
+                >
+                  {syncing ? (
+                    <>
                       <RefreshCw className="w-5 h-5 animate-spin" />
-                    ) : (
-                      <Zap className="w-5 h-5" />
-                    )}
-                    <span>Connect &amp; Sync Live Stats</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    disabled={syncing}
-                    onClick={handleLinkConnectAndRedirect}
-                    className="w-full editorial-btn py-3.5 px-5 rounded-2xl bg-[#FF7EB6] text-[#19154E] font-display font-bold text-sm sm:text-base flex items-center justify-center gap-2"
-                  >
-                    <Instagram className="w-5 h-5" />
-                    <span>Connect &amp; Sign In on IG ↗</span>
-                  </button>
-                </div>
+                      <span>Connecting to Instagram &amp; Pulling Live Stats...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Instagram className="w-5 h-5" />
+                      <span>Connect to Instagram &amp; Pull Stats ↗</span>
+                    </>
+                  )}
+                </button>
 
                 {profile.username && (
                   <div className="pt-1 flex justify-end">
@@ -3468,7 +3362,7 @@ export default function App() {
                       onClick={handleDisconnectInstagram}
                       className="text-xs font-bold text-neutral-500 hover:text-rose-600 underline"
                     >
-                      Disconnect @{profile.username} from this Google profile
+                      Disconnect @{profile.username} from your workspace
                     </button>
                   </div>
                 )}

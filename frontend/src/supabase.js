@@ -81,14 +81,3 @@ export function clearOAuthIntent() {
 }
 
 export const supabase = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
-
-export const SUPERUSER_EMAILS = [
-  'techfairyanna@gmail.com',
-  'anna.kelley300@gmail.com',
-  'anna.kelley88@yahoo.com',
-];
-
-export function isSuperuserEmail(email) {
-  if (!email) return false;
-  return SUPERUSER_EMAILS.includes(email.trim().toLowerCase());
-}

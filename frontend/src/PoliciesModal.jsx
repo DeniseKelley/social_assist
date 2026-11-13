@@ -247,12 +247,14 @@ export default function PoliciesModal({ isOpen, initialSection = 'terms', onClos
               10. Contact Information
             </h4>
             <p>
-              TechFairyLab Support — Email:{' '}
+              TechFairyLab Support — Website:{' '}
               <a
-                href="mailto:techfairyanna@gmail.com"
+                href="https://www.techfairylab.com"
+                target="_blank"
+                rel="noopener noreferrer"
                 className="font-bold text-[#19154E] underline"
               >
-                techfairyanna@gmail.com
+                techfairylab.com
               </a>
             </p>
           </section>
@@ -354,12 +356,14 @@ export default function PoliciesModal({ isOpen, initialSection = 'terms', onClos
             </p>
             <p>
               <strong>Security Policy:</strong> Users must keep credentials secure, avoid sharing
-              passwords, and report any suspected security issues to{' '}
+              passwords, and report any suspected security issues through{' '}
               <a
-                href="mailto:techfairyanna@gmail.com"
+                href="https://www.techfairylab.com"
+                target="_blank"
+                rel="noopener noreferrer"
                 className="font-bold text-[#19154E] underline"
               >
-                techfairyanna@gmail.com
+                techfairylab.com
               </a>
               .
             </p>
