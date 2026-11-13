@@ -390,13 +390,58 @@ export const INITIAL_ANALYTICS = {
   },
 };
 
+export const EMPTY_WORKSPACE_ANALYTICS = {
+  source: 'unconnected_workspace',
+  fetched_at: null,
+  profile: {
+    username: '',
+    name: 'No Instagram Connected Yet',
+    account_type: 'CREATOR',
+    followers_count: 0,
+    follows_count: 0,
+    media_count: 0,
+    biography: 'Paste any Instagram @handle, profile URL, or Graph API token in the Connect IG tab to load live metrics.',
+    profile_picture_url: '',
+    fallback_profile_picture_url: '',
+  },
+  posts: [],
+  analysis: {
+    summary: {
+      total_posts_analyzed: 0,
+      total_views: 0,
+      total_likes: 0,
+      total_comments: 0,
+      total_saves: null,
+      total_shares: null,
+      total_followers_gained: null,
+      avg_engagement_rate: 0,
+      overall_engagement_rate: 0,
+      comment_lift_multiplier: 3.1,
+      us_audience_share_pct: 0,
+      top_reel_views: 0,
+      top_reel_likes: 0,
+      top_reel_title: '',
+    },
+    us_audience_activity: INITIAL_ANALYTICS.analysis.us_audience_activity,
+    strategies: [],
+    content_ideas: [],
+    openclaw_brief: '# Connect an Instagram account in the Connect IG tab to generate a live OpenClaw brief.',
+  },
+};
+
 export function runLocalOpenClawAnalysis(prompt, analyticsData = INITIAL_ANALYTICS) {
-  const posts = analyticsData?.posts || INITIAL_ANALYTICS.posts;
-  const profile = analyticsData?.profile || INITIAL_ANALYTICS.profile;
+  const posts = analyticsData?.posts || [];
+  const profile = analyticsData?.profile || {};
+  const username = profile.username || '';
+  if (!username || posts.length === 0) {
+    return `### 🦞 OpenClaw Live Instagram Agent\nConnect an Instagram account in the **Connect IG** tab first to analyze live Reels, views, likes, and engagement patterns!`;
+  }
+
+  const isTechFairy = username.toLowerCase() === 'techfairyanna';
   const byViews = [...posts].sort((a, b) => (b.views || 0) - (a.views || 0));
-  const top1 = byViews[0] || INITIAL_ANALYTICS.posts[0];
-  const top2 = byViews[1] || INITIAL_ANALYTICS.posts[1];
-  const top3 = byViews[2] || INITIAL_ANALYTICS.posts[2];
+  const top1 = byViews[0] || {};
+  const top2 = byViews[1] || top1;
+  const top3 = byViews[2] || top1;
 
   const followersCount = profile.followers_count || 0;
   const usFollowersEst = Math.round(followersCount * 0.068);
@@ -404,7 +449,34 @@ export function runLocalOpenClawAnalysis(prompt, analyticsData = INITIAL_ANALYTI
   const totalLikes = posts.reduce((acc, p) => acc + (p.likes || 0), 0);
   const totalComments = posts.reduce((acc, p) => acc + (p.comments || 0), 0);
 
-  return `### 🦞 OpenClaw Live Instagram Analysis for @${profile.username || 'techfairyanna'} (${followersCount.toLocaleString()} Live Followers · ${totalViews.toLocaleString()} Live Reel Views)
+  if (!isTechFairy) {
+    return `### 🦞 OpenClaw Live Instagram Analysis for @${username} (${followersCount.toLocaleString()} Live Followers · ${totalViews.toLocaleString()} Tracked Views)
+**Agent Task**: *${prompt}*
+
+---
+
+#### 1. What @${username}'s Live Posts Reveal (${posts.length} Synced Posts)
+Across **${posts.length} live posts** (**${totalViews.toLocaleString()} views** · **${totalLikes.toLocaleString()} likes** · **${totalComments.toLocaleString()} comments**):
+
+1. **🥇 #1 Top Performing Post: "${top1.title || 'Post #1'}"** (*${top1.published_label || 'Live'}*)
+   - **Live Metrics**: **\`${(top1.views || 0).toLocaleString()} views\`** · **\`${(top1.likes || 0).toLocaleString()} likes\`** · **\`${(top1.comments || 0).toLocaleString()} comments\`** · **\`${top1.engagement_rate || 0}% ER\`**
+   - **Link**: ${top1.permalink || ''}
+2. **🥈 #2 Performing Post: "${top2.title || 'Post #2'}"** (*${top2.published_label || 'Live'}*)
+   - **Live Metrics**: **\`${(top2.views || 0).toLocaleString()} views\`** · **\`${(top2.likes || 0).toLocaleString()} likes\`** · **\`${(top2.comments || 0).toLocaleString()} comments\`** · **\`${top2.engagement_rate || 0}% ER\`**
+   - **Link**: ${top2.permalink || ''}
+3. **🥉 #3 Performing Post: "${top3.title || 'Post #3'}"** (*${top3.published_label || 'Live'}*)
+   - **Live Metrics**: **\`${(top3.views || 0).toLocaleString()} views\`** · **\`${(top3.likes || 0).toLocaleString()} likes\`** · **\`${(top3.comments || 0).toLocaleString()} comments\`** · **\`${top3.engagement_rate || 0}% ER\`**
+   - **Link**: ${top3.permalink || ''}
+
+---
+
+#### 2. 🎬 3 Next High-Converting Ideas for @${username}
+1. **Direct Part 2 Sequel to "${(top1.title || 'Your #1 Post').slice(0, 56)}"** — Reuse the exact first-3-second hook format and add a 1-word Comment-to-DM trigger (**\`LINK\`**).
+2. **Rapid 30s Breakdown / Checklist Reel** — Answer the #1 question in the comments of ${top1.permalink || 'your top Reel'} and trigger an automated DM guide (**\`GUIDE\`**).
+3. **Peak Window Publishing** — Test publishing at **12:15 PM EST** and **6:00 PM EST** to capture simultaneous US East & West Coast scroll windows.`;
+  }
+
+  return `### 🦞 OpenClaw Live Instagram Analysis for @${username} (${followersCount.toLocaleString()} Live Followers · ${totalViews.toLocaleString()} Live Reel Views)
 **Agent Task**: *${prompt}*
 
 ---
@@ -443,7 +515,7 @@ With **${followersCount.toLocaleString()} live followers**, your US audience (~6
    - **CTA (28–34s)**: *"Follow @techfairyanna & comment **\`KERNEL\`** for my Linux process signals cheat sheet!"*
 
 2. **Reel #2: "DNS Down Panic: Why It's Always DNS (4 Linux Commands to Prove It)"**
-   - **Hook (0–3s)**: Bold yellow title *"DNS Down Panic"* above a terminal where \`ping 8.8.8.8\` works but \`ping labfae.com\` fails.
+   - **Hook (0–3s)**: Bold yellow title *"DNS Down Panic"* above a terminal where \`ping 8.8.8.8\` works but domain lookup fails.
    - **Body (3–30s)**: Walk through \`dig +trace\`, \`resolvectl status\`, \`cat /etc/resolv.conf\`, and \`nc -zv 1.1.1.1 53\`.
    - **CTA (30–35s)**: *"Save this before your next outage & comment **\`NET\`** for the command sheet!"*
 

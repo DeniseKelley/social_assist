@@ -30,6 +30,7 @@ import {
 import {
   INITIAL_AUTOMATIONS,
   INITIAL_ANALYTICS,
+  EMPTY_WORKSPACE_ANALYTICS,
   runLocalOpenClawAnalysis,
 } from './fallbackEngine';
 import {
@@ -50,18 +51,21 @@ export default function App() {
   const [toast, setToast] = useState(null);
   const [isCastingWand, setIsCastingWand] = useState(false);
 
-  // Admin Login Gate state (protects studio from public visitors)
+  // Multi-account Auth & Workspace state (each Google/Supabase account gets its own Instagram workspace)
   const [isAuthenticated, setIsAuthenticated] = useState(
     () => sessionStorage.getItem('sa_authenticated') === 'true'
   );
-  const [loginUser, setLoginUser] = useState('techfairyanna@gmail.com');
+  const [currentUserEmail, setCurrentUserEmail] = useState(
+    () => sessionStorage.getItem('sa_user_email') || ''
+  );
+  const [loginUser, setLoginUser] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
   const [loginError, setLoginError] = useState('');
   const [loginInfo, setLoginInfo] = useState('');
   const [isSignUpMode, setIsSignUpMode] = useState(false);
 
   // Connect form state
-  const [handleInput, setHandleInput] = useState('https://www.instagram.com/techfairyanna/');
+  const [handleInput, setHandleInput] = useState('');
   const [tokenInput, setTokenInput] = useState('');
   const [appIdInput, setAppIdInput] = useState('');
   const [appSecretInput, setAppSecretInput] = useState('');
@@ -147,14 +151,44 @@ export default function App() {
     }
   };
 
-  const fetchLiveInstagramAnalytics = async ({ forceRefresh = false, overrideHandle = '' } = {}) => {
-    const savedConn = JSON.parse(localStorage.getItem('sa_connection') || 'null');
-    const savedToken = localStorage.getItem('sa_ig_access_token') || '';
+  const getWorkspaceScope = (emailOverride) => {
+    const raw = (emailOverride ?? currentUserEmail ?? sessionStorage.getItem('sa_user_email') ?? '').trim().toLowerCase();
+    return raw || 'techfairyanna';
+  };
+
+  const isAnnaOwner = (emailOverride) => {
+    const scope = getWorkspaceScope(emailOverride);
+    return scope === 'techfairyanna' || isSuperuserEmail(scope);
+  };
+
+  const scopedKey = (base, emailOverride) => `${base}:${getWorkspaceScope(emailOverride)}`;
+
+  const fetchLiveInstagramAnalytics = async ({
+    forceRefresh = false,
+    overrideHandle = '',
+    emailOverride,
+  } = {}) => {
+    const connStr =
+      localStorage.getItem(scopedKey('sa_connection', emailOverride)) ||
+      (isAnnaOwner(emailOverride) ? localStorage.getItem('sa_connection') : null) ||
+      'null';
+    const savedConn = JSON.parse(connStr);
+    const savedToken =
+      localStorage.getItem(scopedKey('sa_ig_access_token', emailOverride)) ||
+      (isAnnaOwner(emailOverride) ? localStorage.getItem('sa_ig_access_token') : '') ||
+      '';
+    const defaultHandle = isAnnaOwner(emailOverride) ? 'techfairyanna' : '';
     const targetHandle = (
       overrideHandle ||
       savedConn?.instagram_handle ||
-      'techfairyanna'
-    ).replace(/^@/, '');
+      defaultHandle
+    ).replace(/^@/, '').trim();
+
+    if (!targetHandle) {
+      setAnalyticsData(EMPTY_WORKSPACE_ANALYTICS);
+      setOpenclawOutput(runLocalOpenClawAnalysis(openclawPrompt, EMPTY_WORKSPACE_ANALYTICS));
+      return EMPTY_WORKSPACE_ANALYTICS;
+    }
 
     const headers = {};
     if (savedToken) {
@@ -181,15 +215,19 @@ export default function App() {
     return anaRes;
   };
 
-  const fetchAll = async () => {
+  const fetchAll = async (emailOverride) => {
     // Purge legacy static cache keys so stale hardcoded snapshots never persist
     localStorage.removeItem('sa_analytics');
     localStorage.removeItem('sa_analytics_v4_real');
     localStorage.removeItem('sa_analytics_v5_live');
 
-    // 1. Load Connection + Automations (FastAPI backend if running locally, otherwise localStorage)
-    let resolvedHandle = 'techfairyanna';
+    const annaWorkspace = isAnnaOwner(emailOverride);
+    let resolvedHandle = annaWorkspace ? 'techfairyanna' : '';
+
     try {
+      if (!annaWorkspace) {
+        throw new Error('Isolated per-user workspace');
+      }
       const [connResp, autoResp] = await Promise.all([
         fetch('/api/connection'),
         fetch('/api/automations'),
@@ -200,78 +238,101 @@ export default function App() {
       const [connRes, autoRes] = await Promise.all([connResp.json(), autoResp.json()]);
       resolvedHandle = (connRes.instagram_handle || 'techfairyanna').replace(/^@/, '');
       setConnection(connRes);
-      setHandleInput(`https://www.instagram.com/${resolvedHandle}/`);
+      setHandleInput(resolvedHandle ? `https://www.instagram.com/${resolvedHandle}/` : '');
       setAppIdInput(connRes.app_id || '');
       setAutomations(autoRes.automations || []);
       setLogs(autoRes.recent_logs || []);
     } catch {
-      const savedFlows =
-        JSON.parse(localStorage.getItem('sa_automations') || 'null') || INITIAL_AUTOMATIONS;
-      const savedLogs = JSON.parse(localStorage.getItem('sa_logs') || '[]');
-      const savedConn = JSON.parse(localStorage.getItem('sa_connection') || 'null') || {
-        instagram_handle: 'techfairyanna',
-        has_access_token: Boolean(localStorage.getItem('sa_ig_access_token')),
+      const rawFlows =
+        localStorage.getItem(scopedKey('sa_automations', emailOverride)) ||
+        (annaWorkspace ? localStorage.getItem('sa_automations') : null);
+      const savedFlows = JSON.parse(rawFlows || 'null') || (annaWorkspace ? INITIAL_AUTOMATIONS : []);
+
+      const rawLogs =
+        localStorage.getItem(scopedKey('sa_logs', emailOverride)) ||
+        (annaWorkspace ? localStorage.getItem('sa_logs') : null);
+      const savedLogs = JSON.parse(rawLogs || '[]');
+
+      const rawConn =
+        localStorage.getItem(scopedKey('sa_connection', emailOverride)) ||
+        (annaWorkspace ? localStorage.getItem('sa_connection') : null);
+      const savedToken =
+        localStorage.getItem(scopedKey('sa_ig_access_token', emailOverride)) ||
+        (annaWorkspace ? localStorage.getItem('sa_ig_access_token') : '');
+
+      const savedConn = JSON.parse(rawConn || 'null') || {
+        instagram_handle: annaWorkspace ? 'techfairyanna' : '',
+        has_access_token: Boolean(savedToken),
         webhook_verify_token: 'social_assist_verify_token',
       };
-      resolvedHandle = (savedConn.instagram_handle || 'techfairyanna').replace(/^@/, '');
+      resolvedHandle = (savedConn.instagram_handle || '').replace(/^@/, '').trim();
       setConnection(savedConn);
-      setHandleInput(`https://www.instagram.com/${resolvedHandle}/`);
+      setHandleInput(resolvedHandle ? `https://www.instagram.com/${resolvedHandle}/` : '');
       setAutomations(savedFlows);
       setLogs(savedLogs);
+
+      if (!resolvedHandle && !annaWorkspace) {
+        setActiveTab('connect');
+      }
     }
 
     // 2. Always fetch live Instagram stats independently from `/api/analytics`
     try {
-      await fetchLiveInstagramAnalytics({ forceRefresh: false, overrideHandle: resolvedHandle });
+      await fetchLiveInstagramAnalytics({
+        forceRefresh: false,
+        overrideHandle: resolvedHandle,
+        emailOverride,
+      });
     } catch {
-      setAnalyticsData((prev) => prev || INITIAL_ANALYTICS);
+      setAnalyticsData((prev) => prev || (annaWorkspace ? INITIAL_ANALYTICS : EMPTY_WORKSPACE_ANALYTICS));
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    fetchAll();
+    const initialEmail = sessionStorage.getItem('sa_user_email') || '';
+    fetchAll(initialEmail);
 
     // Auto-refresh live Instagram numbers every 90 seconds while the tab is visible
     const livePollTimer = setInterval(() => {
       if (document.visibilityState === 'visible') {
-        fetchLiveInstagramAnalytics({ forceRefresh: true }).catch(() => {});
+        const activeEmail = sessionStorage.getItem('sa_user_email') || '';
+        fetchLiveInstagramAnalytics({ forceRefresh: true, emailOverride: activeEmail }).catch(() => {});
       }
     }, 90000);
 
-    // Check active Supabase session (from Google OAuth redirect or Supabase login)
+    // Check active Supabase session (any Google or Supabase user gets their own isolated workspace)
     supabase.auth.getSession().then(({ data: { session } }) => {
-      const email = session?.user?.email;
-      if (email && isSuperuserEmail(email)) {
+      const email = session?.user?.email?.toLowerCase();
+      if (email) {
         sessionStorage.setItem('sa_authenticated', 'true');
+        sessionStorage.setItem('sa_user_email', email);
+        setCurrentUserEmail(email);
         setIsAuthenticated(true);
+        fetchAll(email);
       }
     });
 
     const { data: authSub } = supabase.auth.onAuthStateChange((_event, session) => {
-      const email = session?.user?.email;
+      const email = session?.user?.email?.toLowerCase();
       if (email) {
-        if (isSuperuserEmail(email)) {
-          sessionStorage.setItem('sa_authenticated', 'true');
-          setIsAuthenticated(true);
-          setLoginError('');
-          if (window.location.hash.includes('access_token') || window.location.search.includes('code=')) {
-            window.history.replaceState({}, document.title, `${window.location.origin}${window.location.pathname}`);
-          }
-        } else {
-          setLoginError(
-            `Signed in as ${email}, which is not authorized for @techfairyanna's private studio.`
-          );
-          supabase.auth.signOut();
+        sessionStorage.setItem('sa_authenticated', 'true');
+        sessionStorage.setItem('sa_user_email', email);
+        setCurrentUserEmail(email);
+        setIsAuthenticated(true);
+        setLoginError('');
+        if (window.location.hash.includes('access_token') || window.location.search.includes('code=')) {
+          window.history.replaceState({}, document.title, `${window.location.origin}${window.location.pathname}`);
         }
+        fetchAll(email);
       }
     });
 
     const handleOAuthMessage = (event) => {
       if (event.data && event.data.type === 'IG_OAUTH_SUCCESS') {
-        showToast('Connected @techfairyanna via Instagram OAuth!');
-        fetchAll();
+        showToast('Connected Instagram via OAuth!');
+        fetchAll(sessionStorage.getItem('sa_user_email') || '');
       }
     };
     window.addEventListener('message', handleOAuthMessage);
@@ -284,6 +345,7 @@ export default function App() {
 
   const extractHandleFromLink = (raw) => {
     const s = (raw || '').trim();
+    if (!s) return '';
     if (s.includes('instagram.com/')) {
       const after = s.split('instagram.com/')[1].split('?')[0].replace(/^\/+|\/+$/g, '');
       const seg = after.split('/')[0].replace(/^@/, '');
@@ -291,12 +353,16 @@ export default function App() {
         return seg;
       }
     }
-    return s.replace(/^@/, '').replace(/^\/+|\/+$/g, '') || 'techfairyanna';
+    return s.replace(/^@/, '').replace(/^\/+|\/+$/g, '');
   };
 
   const handleLinkConnectAndRedirect = async (e) => {
     if (e) e.preventDefault();
     const extracted = extractHandleFromLink(handleInput);
+    if (!extracted) {
+      showToast('Enter an Instagram @handle or profile link first!', 'error');
+      return;
+    }
     // Open Instagram login / profile authorization window immediately on user click
     const targetUrl =
       connection?.oauth_login_url ||
@@ -308,9 +374,16 @@ export default function App() {
   const handleConnectSubmit = async (e, overrideHandle) => {
     if (e) e.preventDefault();
     const cleanHandle = overrideHandle || extractHandleFromLink(handleInput);
+    if (!cleanHandle && !(tokenInput && tokenInput.trim())) {
+      setConnectStatusMsg({ type: 'error', text: 'Please enter an Instagram @handle, profile URL, or Graph API token.' });
+      return;
+    }
     setSyncing(true);
     setConnectStatusMsg(null);
     try {
+      if (!isAnnaOwner()) {
+        throw new Error('Serverless per-user workspace');
+      }
       const res = await fetch('/api/connection/connect', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -335,9 +408,8 @@ export default function App() {
       try {
         if (tokenInput && tokenInput.trim()) {
           const cleanToken = tokenInput.trim();
-          // Verify token & pull live media + insights via serverless `/api/analytics`
           const verifyResp = await fetch(
-            `/api/analytics?handle=${encodeURIComponent(cleanHandle)}&refresh=true&strict_token=true`,
+            `/api/analytics?handle=${encodeURIComponent(cleanHandle || 'me')}&refresh=true&strict_token=true`,
             {
               headers: { Authorization: `Bearer ${cleanToken}` },
               cache: 'no-store',
@@ -348,38 +420,43 @@ export default function App() {
             throw new Error(errJson.error || 'Invalid Instagram Graph API token');
           }
           const liveAna = await verifyResp.json();
-          localStorage.setItem('sa_ig_access_token', cleanToken);
+          const finalHandle = liveAna.profile?.username || cleanHandle;
+          localStorage.setItem(scopedKey('sa_ig_access_token'), cleanToken);
           const updatedConn = {
-            instagram_handle: liveAna.profile?.username || cleanHandle,
+            instagram_handle: finalHandle,
             has_access_token: true,
             account_id: liveAna.profile?.account_id || '',
             webhook_verify_token: 'social_assist_verify_token',
           };
-          localStorage.setItem('sa_connection', JSON.stringify(updatedConn));
+          localStorage.setItem(scopedKey('sa_connection'), JSON.stringify(updatedConn));
           setConnection(updatedConn);
+          setHandleInput(`https://www.instagram.com/${finalHandle}/`);
           setAnalyticsData(liveAna);
           setOpenclawOutput(runLocalOpenClawAnalysis(openclawPrompt, liveAna));
           setConnectStatusMsg({
             type: 'success',
-            text: `Connected @${updatedConn.instagram_handle} via Official Instagram Graph API (live metrics synced)!`,
+            text: `Connected @${finalHandle} via Official Instagram Graph API (live metrics synced)!`,
           });
-          showToast(`Connected @${updatedConn.instagram_handle} via Graph API!`);
+          showToast(`Connected @${finalHandle} via Graph API!`);
           setTokenInput('');
+          setActiveTab('analytics');
           triggerFairyWand();
         } else {
           const updatedConn = {
             instagram_handle: cleanHandle,
-            has_access_token: Boolean(localStorage.getItem('sa_ig_access_token')),
+            has_access_token: Boolean(localStorage.getItem(scopedKey('sa_ig_access_token'))),
             webhook_verify_token: 'social_assist_verify_token',
           };
-          localStorage.setItem('sa_connection', JSON.stringify(updatedConn));
+          localStorage.setItem(scopedKey('sa_connection'), JSON.stringify(updatedConn));
           setConnection(updatedConn);
+          setHandleInput(`https://www.instagram.com/${cleanHandle}/`);
           await fetchLiveInstagramAnalytics({ forceRefresh: true, overrideHandle: cleanHandle });
           setConnectStatusMsg({
             type: 'success',
-            text: `Synced live Instagram stats for @${cleanHandle}!`,
+            text: `Connected & synced live Instagram stats for @${cleanHandle}!`,
           });
           showToast(`Synced live stats for @${cleanHandle}!`);
+          setActiveTab('analytics');
           triggerFairyWand();
         }
       } catch (innerErr) {
@@ -434,7 +511,7 @@ export default function App() {
     };
     const next = [created, ...automations];
     setAutomations(next);
-    localStorage.setItem('sa_automations', JSON.stringify(next));
+    localStorage.setItem(scopedKey('sa_automations'), JSON.stringify(next));
     showToast(`Created automation "${newFlow.name}"!`);
     setShowNewFlow(false);
     triggerFairyWand();
@@ -442,6 +519,7 @@ export default function App() {
 
   const handleToggleFlow = async (id) => {
     try {
+      if (!isAnnaOwner()) throw new Error('Per-user store');
       const res = await fetch(`/api/automations/${id}/toggle`, { method: 'PATCH' });
       if (res.ok) {
         triggerFairyWand();
@@ -453,12 +531,13 @@ export default function App() {
     }
     const next = automations.map((f) => (f.id === id ? { ...f, active: !f.active } : f));
     setAutomations(next);
-    localStorage.setItem('sa_automations', JSON.stringify(next));
+    localStorage.setItem(scopedKey('sa_automations'), JSON.stringify(next));
     triggerFairyWand();
   };
 
   const handleDeleteFlow = async (id) => {
     try {
+      if (!isAnnaOwner()) throw new Error('Per-user store');
       const res = await fetch(`/api/automations/${id}`, { method: 'DELETE' });
       if (res.ok) {
         showToast('Automation deleted');
@@ -470,7 +549,7 @@ export default function App() {
     }
     const next = automations.filter((f) => f.id !== id);
     setAutomations(next);
-    localStorage.setItem('sa_automations', JSON.stringify(next));
+    localStorage.setItem(scopedKey('sa_automations'), JSON.stringify(next));
     showToast('Automation deleted');
   };
 
@@ -478,6 +557,7 @@ export default function App() {
     if (e) e.preventDefault();
     triggerFairyWand();
     try {
+      if (!isAnnaOwner()) throw new Error('Per-user store');
       const res = await fetch('/api/automations/simulate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -537,7 +617,7 @@ export default function App() {
     };
     const nextLogs = [logEntry, ...logs].slice(0, 30);
     setLogs(nextLogs);
-    localStorage.setItem('sa_logs', JSON.stringify(nextLogs));
+    localStorage.setItem(scopedKey('sa_logs'), JSON.stringify(nextLogs));
     setSimResult({ matched: true, flow: matchedFlow, log: logEntry });
   };
 
@@ -556,6 +636,7 @@ export default function App() {
   };
 
   const handleApplyStrategyKeyword = (keyword, title) => {
+    const activeHandle = analyticsData?.profile?.username || connection?.instagram_handle || 'creator';
     setNewFlow({
       name: `${title.slice(0, 36)}...`,
       trigger_type: keyword === '🔥' ? 'story_reply' : 'comment_keyword',
@@ -564,9 +645,9 @@ export default function App() {
         keyword === '🔥'
           ? ''
           : `Sent it straight to your DMs! Check your message requests ✨🧚‍♀️`,
-      dm_message: `Hey! 👋 Thanks for engaging with @techfairyanna! Here is the ${keyword} resource from my post:`,
+      dm_message: `Hey! 👋 Thanks for engaging with @${activeHandle}! Here is the ${keyword} resource from my post:`,
       dm_button_text: `Get ${keyword} Resource ✨`,
-      dm_button_url: 'https://labfae.com',
+      dm_button_url: 'https://techfairylab.com',
     });
     setActiveTab('automations');
     setShowNewFlow(true);
@@ -602,7 +683,12 @@ export default function App() {
 
     const { error } = await supabase.auth.signInWithOAuth({
       provider: 'google',
-      options: { redirectTo: redirectUrl },
+      options: {
+        redirectTo: redirectUrl,
+        queryParams: {
+          prompt: 'select_account',
+        },
+      },
     });
     if (error) {
       setLoginError(error.message);
@@ -616,10 +702,10 @@ export default function App() {
     const userOrEmail = loginUser.trim().toLowerCase();
     const redirectUrl = `${window.location.origin}${window.location.pathname}`;
 
-    // 0. Superuser registration on the dedicated techfairylab Supabase project
+    // 0. Email account registration on the dedicated techfairylab Supabase project
     if (isSignUpMode) {
-      if (!userOrEmail.includes('@') || !isSuperuserEmail(userOrEmail)) {
-        setLoginError('Only @techfairyanna superuser emails are permitted to register.');
+      if (!userOrEmail.includes('@')) {
+        setLoginError('Please enter a valid email address to create an account.');
         return;
       }
       const { data, error } = await supabase.auth.signUp({
@@ -633,8 +719,11 @@ export default function App() {
       }
       if (data?.session) {
         sessionStorage.setItem('sa_authenticated', 'true');
+        sessionStorage.setItem('sa_user_email', userOrEmail);
+        setCurrentUserEmail(userOrEmail);
         setIsAuthenticated(true);
         setLoginPassword('');
+        await fetchAll(userOrEmail);
         triggerFairyWand();
         return;
       }
@@ -645,24 +734,23 @@ export default function App() {
       return;
     }
 
-    // 1. If the user entered an email address, authenticate via Supabase Auth first!
+    // 1. If the user entered an email address, authenticate via Supabase Auth!
     if (userOrEmail.includes('@')) {
-      if (!isSuperuserEmail(userOrEmail)) {
-        setLoginError('Only @techfairyanna superuser emails are permitted.');
-        return;
-      }
       const { data, error } = await supabase.auth.signInWithPassword({
         email: userOrEmail,
         password: loginPassword,
       });
       if (!error && data?.user) {
         sessionStorage.setItem('sa_authenticated', 'true');
+        sessionStorage.setItem('sa_user_email', userOrEmail);
+        setCurrentUserEmail(userOrEmail);
         setIsAuthenticated(true);
         setLoginPassword('');
+        await fetchAll(userOrEmail);
         triggerFairyWand();
         return;
       }
-      // Also allow unlocking if they typed their superuser email + the studio master password
+      // Also allow unlocking if Anna typed her superuser email + the studio master password
     }
 
     // 2. Verify SHA-256 Studio Password (works for handle 'techfairyanna' or superuser email)
@@ -681,21 +769,27 @@ export default function App() {
       userOrEmail === 'techfairyanna' || isSuperuserEmail(userOrEmail);
 
     if (validIdentity && hashHex === expectedHash) {
+      const studioOwnerId = userOrEmail || 'techfairyanna';
       sessionStorage.setItem('sa_authenticated', 'true');
+      sessionStorage.setItem('sa_user_email', studioOwnerId);
+      setCurrentUserEmail(studioOwnerId);
       setIsAuthenticated(true);
       setLoginPassword('');
+      await fetchAll(studioOwnerId);
       triggerFairyWand();
     } else {
       setLoginError(
         userOrEmail.includes('@')
-          ? 'Account not found or wrong password on the new techfairylab Supabase project — click "Create Superuser Account" below if this is your first login here!'
-          : 'Invalid credentials. Sign in with Google, Supabase email, or studio password.'
+          ? 'Invalid email or password — click "Create Account" below if this is your first time signing in with email!'
+          : 'Invalid credentials. Sign in with Google, email, or studio password.'
       );
     }
   };
 
   const handleLockStudio = async () => {
     sessionStorage.removeItem('sa_authenticated');
+    sessionStorage.removeItem('sa_user_email');
+    setCurrentUserEmail('');
     await supabase.auth.signOut().catch(() => {});
     setIsAuthenticated(false);
   };
@@ -710,13 +804,13 @@ export default function App() {
             </div>
             <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#FFE4F1] border-2 border-[#19154E] text-xs font-bold">
               <ShieldCheck className="w-4 h-4 text-[#19154E]" />
-              <span>Private Creator Studio</span>
+              <span>Multi-Account Creator Studio</span>
             </span>
             <h1 className="font-display text-2xl sm:text-3xl font-bold text-[#19154E]">
               SocialAssist Login
             </h1>
             <p className="text-xs text-neutral-600 font-medium">
-              Protected workspace for <strong>@techfairyanna</strong>. Sign in with Google, Supabase Auth, or your studio password.
+              Sign in with any Google account or email — each login gets its own separate Instagram workspace, live stats, and DM automations.
             </p>
           </div>
 
@@ -732,7 +826,7 @@ export default function App() {
             </div>
           )}
 
-          {/* 1-Click Google Sign-In via Supabase OAuth */}
+          {/* 1-Click Google Sign-In via Supabase OAuth (Always prompts account picker) */}
           <button
             type="button"
             onClick={handleGoogleSignIn}
@@ -756,13 +850,13 @@ export default function App() {
                 d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.31 0 3.26 2.7 1.29 6.62l3.99 3.14c.95-2.85 3.6-4.96 6.72-4.96z"
               />
             </svg>
-            <span>Continue with Google</span>
+            <span>Choose Google Account</span>
           </button>
 
           <div className="relative flex py-1 items-center">
             <div className="flex-grow border-t-2 border-dashed border-neutral-300" />
             <span className="flex-shrink mx-3 text-[11px] font-bold uppercase tracking-wider text-neutral-500">
-              or Supabase Email / Studio Key
+              or Email / Studio Key
             </span>
             <div className="flex-grow border-t-2 border-dashed border-neutral-300" />
           </div>
@@ -770,12 +864,12 @@ export default function App() {
           <form onSubmit={handleAdminLogin} className="space-y-3.5">
             <div>
               <label className="block text-xs font-bold text-[#19154E] mb-1">
-                Supabase Email or Handle
+                Email Address (or Studio Handle)
               </label>
               <input
                 type="text"
                 required
-                placeholder="techfairyanna@gmail.com or techfairyanna"
+                placeholder="you@gmail.com"
                 value={loginUser}
                 onChange={(e) => setLoginUser(e.target.value)}
                 className="w-full px-3.5 py-2.5 rounded-xl bg-[#FFF8FC] border-2 border-[#19154E] text-sm font-bold focus:outline-none focus:bg-white"
@@ -801,7 +895,7 @@ export default function App() {
               className="w-full editorial-btn py-3 rounded-2xl bg-[#FF7EB6] text-[#19154E] font-display font-bold text-sm flex items-center justify-center gap-2"
             >
               <KeyRound className="w-4 h-4" />
-              <span>{isSignUpMode ? 'Create Superuser Account ✨' : 'Unlock Studio ✨'}</span>
+              <span>{isSignUpMode ? 'Create Account ✨' : 'Sign In ✨'}</span>
             </button>
 
             <div className="text-center pt-0.5">
@@ -815,8 +909,8 @@ export default function App() {
                 className="text-xs font-bold text-[#19154E] underline hover:opacity-80"
               >
                 {isSignUpMode
-                  ? 'Already registered on Supabase? Sign in instead'
-                  : 'First time on new Supabase? Create Superuser Account'}
+                  ? 'Already have an account? Sign in instead'
+                  : 'New email account? Create Account'}
               </button>
             </div>
           </form>
@@ -840,27 +934,33 @@ export default function App() {
         <div className="editorial-card px-8 py-6 flex items-center gap-4 bg-white">
           <RefreshCw className="w-6 h-6 animate-spin text-[#FF7EB6]" />
           <span className="font-display text-lg font-bold">
-            Waking up @techfairyanna Studio...
+            Waking up SocialAssist Studio...
           </span>
         </div>
       </div>
     );
   }
 
-  const profile = analyticsData?.profile || INITIAL_ANALYTICS.profile;
+  const baseFallback = isAnnaOwner() ? INITIAL_ANALYTICS : EMPTY_WORKSPACE_ANALYTICS;
+  const isUnconnected = analyticsData?.source === 'unconnected_workspace';
+  const profile = analyticsData?.profile || baseFallback.profile;
   const summary = {
-    ...INITIAL_ANALYTICS.analysis.summary,
+    ...baseFallback.analysis.summary,
     ...(analyticsData?.analysis?.summary || {}),
   };
-  const strategies = analyticsData?.analysis?.strategies || INITIAL_ANALYTICS.analysis.strategies;
+  const strategies = analyticsData?.analysis?.strategies || baseFallback.analysis.strategies;
   const contentIdeas =
-    analyticsData?.analysis?.content_ideas || INITIAL_ANALYTICS.analysis.content_ideas;
-  const rawPosts =
-    analyticsData?.posts && analyticsData.posts.length > 0
-      ? analyticsData.posts
-      : INITIAL_ANALYTICS.posts;
+    analyticsData?.analysis?.content_ideas || baseFallback.analysis.content_ideas;
+  const rawPosts = isUnconnected
+    ? []
+    : analyticsData?.posts && analyticsData.posts.length > 0
+    ? analyticsData.posts
+    : baseFallback.posts;
   const posts = rawPosts.map((p) => {
-    const fallbackMatch = INITIAL_ANALYTICS.posts.find((fp) => fp.id === p.id) || {};
+    const fallbackMatch =
+      String(profile.username || '').toLowerCase() === 'techfairyanna'
+        ? INITIAL_ANALYTICS.posts.find((fp) => fp.id === p.id) || {}
+        : {};
     const views = typeof p.views === 'number' ? p.views : fallbackMatch.views || 0;
     const likes = typeof p.likes === 'number' ? p.likes : fallbackMatch.likes || 0;
     const comments = typeof p.comments === 'number' ? p.comments : fallbackMatch.comments || 0;
@@ -964,9 +1064,14 @@ export default function App() {
                 <h1 className="font-display font-bold text-xl sm:text-2xl tracking-tight text-[#19154E]">
                   SocialAssist
                 </h1>
-                <span className="text-xs px-2.5 py-0.5 rounded-full bg-[#C8F904] text-[#19154E] border-2 border-[#19154E] font-bold">
-                  @{profile.username || 'techfairyanna'}
-                </span>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('connect')}
+                  title="Switch or connect an Instagram account"
+                  className="text-xs px-2.5 py-0.5 rounded-full bg-[#C8F904] text-[#19154E] border-2 border-[#19154E] font-bold hover:opacity-90"
+                >
+                  {profile.username ? `@${profile.username}` : '+ Connect IG'}
+                </button>
                 <a
                   href="../index.html"
                   className="text-[11px] px-2 py-0.5 rounded-lg bg-white border border-[#19154E] font-bold text-neutral-700 hover:bg-[#B799E8] hover:text-[#19154E] transition-colors duration-150 hidden md:inline-block"
@@ -976,7 +1081,9 @@ export default function App() {
                 </a>
               </div>
               <p className="text-xs font-medium text-neutral-600 hidden sm:block">
-                Automated Instagram DM Studio & Growth Observatory
+                {currentUserEmail
+                  ? `Signed in as ${currentUserEmail}`
+                  : 'Automated Instagram DM Studio & Growth Observatory'}
               </p>
             </div>
           </div>
@@ -1034,10 +1141,10 @@ export default function App() {
             </button>
             <button
               onClick={handleLockStudio}
-              title="Lock Studio"
-              className="px-2.5 py-2 rounded-xl text-xs font-bold text-[#19154E] hover:bg-[#FFE4F1] transition-colors duration-150"
+              title={currentUserEmail ? `Signed in as ${currentUserEmail} — click to switch Google account` : 'Switch Account / Sign Out'}
+              className="px-2.5 py-2 rounded-xl text-xs font-bold text-[#19154E] bg-white/80 hover:bg-[#FFE4F1] border border-[#19154E]/30 transition-colors duration-150"
             >
-              🔒
+              Switch Account
             </button>
           </nav>
         </div>
@@ -2575,20 +2682,29 @@ export default function App() {
             <div className="editorial-card p-6 sm:p-8 bg-white space-y-6">
               <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-center border-b-2 border-[#19154E] pb-5">
                 <div className="md:col-span-8 space-y-2">
-                  <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#C8F904] border-2 border-[#19154E] text-xs font-bold">
-                    <ShieldCheck className="w-4 h-4" />
-                    <span>1-Step Link Connect</span>
-                  </span>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#C8F904] border-2 border-[#19154E] text-xs font-bold">
+                      <ShieldCheck className="w-4 h-4" />
+                      <span>Isolated Workspace</span>
+                    </span>
+                    {currentUserEmail && (
+                      <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#F5EEFF] border-2 border-[#19154E] text-xs font-bold">
+                        <span>{currentUserEmail}</span>
+                      </span>
+                    )}
+                  </div>
                   <h3 className="font-display text-2xl sm:text-3xl font-bold text-[#19154E]">
-                    Connect @{profile.username} by Link
+                    {profile.username
+                      ? `Connected to @${profile.username}`
+                      : 'Connect Your Instagram Account'}
                   </h3>
                   <p className="text-xs sm:text-sm text-neutral-700 font-medium">
-                    Paste your Instagram account link below and click <strong>Connect &amp; Sign In on Instagram</strong>—you&apos;ll be redirected to Instagram Login automatically with zero manual IDs needed!
+                    Paste any Instagram <strong>@handle</strong> or profile link below to attach it to this Google login and pull live followers, posts, and Reel metrics.
                   </p>
                 </div>
                 <div className="md:col-span-4 flex justify-center">
                   <div className="w-48 h-32">
-                    <PlugMechanicCharacter connected={Boolean(connection?.has_access_token)} />
+                    <PlugMechanicCharacter connected={Boolean(profile.username)} />
                   </div>
                 </div>
               </div>
@@ -2605,40 +2721,54 @@ export default function App() {
                 </div>
               )}
 
-              {/* Primary 1-Click Link + Redirect Form */}
-              <form onSubmit={handleLinkConnectAndRedirect} className="space-y-4">
+              {/* Primary 1-Click Link + Sync / Redirect Form */}
+              <form onSubmit={handleConnectSubmit} className="space-y-4">
                 <div className="p-5 rounded-2xl bg-[#FFF8FC] border-2 border-[#19154E] space-y-3">
                   <label className="block text-sm font-display font-bold text-[#19154E]">
-                    Paste Your Instagram Account Link
+                    Instagram Profile Link or @Username
                   </label>
                   <input
                     type="text"
                     required
                     value={handleInput}
                     onChange={(e) => setHandleInput(e.target.value)}
-                    placeholder="https://www.instagram.com/techfairyanna/"
+                    placeholder="https://www.instagram.com/your_handle/ or @your_handle"
                     className="w-full px-4 py-3 rounded-xl bg-white border-2 border-[#19154E] text-sm font-bold text-[#19154E] focus:outline-none"
                   />
                   <p className="text-xs text-neutral-600 font-medium">
                     Detected account:{' '}
                     <strong className="font-mono-code text-[#6D28D9]">
-                      @{extractHandleFromLink(handleInput)}
+                      {extractHandleFromLink(handleInput)
+                        ? `@${extractHandleFromLink(handleInput)}`
+                        : 'Enter an Instagram handle above'}
                     </strong>
                   </p>
                 </div>
 
-                <button
-                  type="submit"
-                  disabled={syncing}
-                  className="w-full editorial-btn py-3.5 px-6 rounded-2xl bg-[#FF7EB6] text-[#19154E] font-display font-bold text-base flex items-center justify-center gap-2.5"
-                >
-                  {syncing ? (
-                    <RefreshCw className="w-5 h-5 animate-spin" />
-                  ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <button
+                    type="submit"
+                    disabled={syncing}
+                    className="w-full editorial-btn py-3.5 px-5 rounded-2xl bg-[#C8F904] text-[#19154E] font-display font-bold text-sm sm:text-base flex items-center justify-center gap-2"
+                  >
+                    {syncing ? (
+                      <RefreshCw className="w-5 h-5 animate-spin" />
+                    ) : (
+                      <Zap className="w-5 h-5" />
+                    )}
+                    <span>Connect &amp; Sync Live Stats</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={syncing}
+                    onClick={handleLinkConnectAndRedirect}
+                    className="w-full editorial-btn py-3.5 px-5 rounded-2xl bg-[#FF7EB6] text-[#19154E] font-display font-bold text-sm sm:text-base flex items-center justify-center gap-2"
+                  >
                     <Instagram className="w-5 h-5" />
-                  )}
-                  <span>Connect Link &amp; Redirect to Instagram Login ↗</span>
-                </button>
+                    <span>Connect &amp; Sign In on IG ↗</span>
+                  </button>
+                </div>
               </form>
 
               {/* Optional Collapsed Advanced Section (Hidden by Default) */}
