@@ -1,12 +1,26 @@
 import { createClient } from '@supabase/supabase-js';
 
-const supabaseUrl =
-  import.meta.env.VITE_SUPABASE_URL || 'https://xfyaizroguvnlekxuouu.supabase.co';
+export const SUPABASE_URL =
+  import.meta.env.VITE_SUPABASE_URL || 'https://ttmtmsafqmfjdkbtjglv.supabase.co';
 
-const supabaseKey =
-  import.meta.env.VITE_SUPABASE_ANON_KEY || 'sb_publishable_Xv3OS810wGh7OV-zzewkkw_tlKW3JLJ';
+export const SUPABASE_PUBLISHABLE_KEY =
+  import.meta.env.VITE_SUPABASE_ANON_KEY ||
+  'sb_publishable_zAgfHOr1r2UmatFiZv8Eiw_Fh4Vos2y';
 
-export const supabase = createClient(supabaseUrl, supabaseKey);
+// Clean up any legacy auth token from the old shared project
+if (typeof window !== 'undefined' && window.localStorage) {
+  try {
+    Object.keys(window.localStorage).forEach((k) => {
+      if (k.includes('xfyaizroguvnlekxuouu')) {
+        window.localStorage.removeItem(k);
+      }
+    });
+  } catch {
+    // ignore storage errors
+  }
+}
+
+export const supabase = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
 
 export const SUPERUSER_EMAILS = [
   'techfairyanna@gmail.com',

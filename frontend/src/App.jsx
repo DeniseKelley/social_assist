@@ -32,7 +32,12 @@ import {
   INITIAL_ANALYTICS,
   runLocalOpenClawAnalysis,
 } from './fallbackEngine';
-import { supabase, isSuperuserEmail } from './supabase';
+import {
+  supabase,
+  isSuperuserEmail,
+  SUPABASE_URL,
+  SUPABASE_PUBLISHABLE_KEY,
+} from './supabase';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('automations'); // 'automations' | 'analytics' | 'strategy' | 'connect'
@@ -49,9 +54,11 @@ export default function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(
     () => sessionStorage.getItem('sa_authenticated') === 'true'
   );
-  const [loginUser, setLoginUser] = useState('techfairyanna');
+  const [loginUser, setLoginUser] = useState('techfairyanna@gmail.com');
   const [loginPassword, setLoginPassword] = useState('');
   const [loginError, setLoginError] = useState('');
+  const [loginInfo, setLoginInfo] = useState('');
+  const [isSignUpMode, setIsSignUpMode] = useState(false);
 
   // Connect form state
   const [handleInput, setHandleInput] = useState('https://www.instagram.com/techfairyanna/');
@@ -574,7 +581,25 @@ export default function App() {
 
   const handleGoogleSignIn = async () => {
     setLoginError('');
+    setLoginInfo('');
     const redirectUrl = `${window.location.origin}${window.location.pathname}`;
+    try {
+      const settingsResp = await fetch(`${SUPABASE_URL}/auth/v1/settings`, {
+        headers: { apikey: SUPABASE_PUBLISHABLE_KEY },
+      });
+      if (settingsResp.ok) {
+        const settings = await settingsResp.json();
+        if (settings?.external && settings.external.google === false) {
+          setLoginError(
+            'Google provider is not toggled ON yet in your techfairylab Supabase project (Authentication → Sign In / Providers → Google). You can sign in below with Supabase Email or toggle Google ON first.'
+          );
+          return;
+        }
+      }
+    } catch {
+      // Proceed to standard OAuth call if preflight check fails
+    }
+
     const { error } = await supabase.auth.signInWithOAuth({
       provider: 'google',
       options: { redirectTo: redirectUrl },
@@ -587,7 +612,38 @@ export default function App() {
   const handleAdminLogin = async (e) => {
     e.preventDefault();
     setLoginError('');
+    setLoginInfo('');
     const userOrEmail = loginUser.trim().toLowerCase();
+    const redirectUrl = `${window.location.origin}${window.location.pathname}`;
+
+    // 0. Superuser registration on the dedicated techfairylab Supabase project
+    if (isSignUpMode) {
+      if (!userOrEmail.includes('@') || !isSuperuserEmail(userOrEmail)) {
+        setLoginError('Only @techfairyanna superuser emails are permitted to register.');
+        return;
+      }
+      const { data, error } = await supabase.auth.signUp({
+        email: userOrEmail,
+        password: loginPassword,
+        options: { emailRedirectTo: redirectUrl },
+      });
+      if (error) {
+        setLoginError(error.message);
+        return;
+      }
+      if (data?.session) {
+        sessionStorage.setItem('sa_authenticated', 'true');
+        setIsAuthenticated(true);
+        setLoginPassword('');
+        triggerFairyWand();
+        return;
+      }
+      setIsSignUpMode(false);
+      setLoginInfo(
+        `Confirmation email sent to ${userOrEmail}! Click the link in your inbox and it will bring you right back to SocialAssist.`
+      );
+      return;
+    }
 
     // 1. If the user entered an email address, authenticate via Supabase Auth first!
     if (userOrEmail.includes('@')) {
@@ -630,7 +686,11 @@ export default function App() {
       setLoginPassword('');
       triggerFairyWand();
     } else {
-      setLoginError('Invalid credentials. Sign in with Google, Supabase email, or studio password.');
+      setLoginError(
+        userOrEmail.includes('@')
+          ? 'Account not found or wrong password on the new techfairylab Supabase project — click "Create Superuser Account" below if this is your first login here!'
+          : 'Invalid credentials. Sign in with Google, Supabase email, or studio password.'
+      );
     }
   };
 
@@ -663,6 +723,12 @@ export default function App() {
           {loginError && (
             <div className="p-3 rounded-xl bg-[#FFE4F1] border-2 border-[#19154E] text-xs font-bold text-[#19154E] text-center">
               {loginError}
+            </div>
+          )}
+
+          {loginInfo && (
+            <div className="p-3 rounded-xl bg-[#E8FFF3] border-2 border-[#19154E] text-xs font-bold text-[#19154E] text-center">
+              {loginInfo}
             </div>
           )}
 
@@ -735,8 +801,24 @@ export default function App() {
               className="w-full editorial-btn py-3 rounded-2xl bg-[#FF7EB6] text-[#19154E] font-display font-bold text-sm flex items-center justify-center gap-2"
             >
               <KeyRound className="w-4 h-4" />
-              <span>Unlock Studio ✨</span>
+              <span>{isSignUpMode ? 'Create Superuser Account ✨' : 'Unlock Studio ✨'}</span>
             </button>
+
+            <div className="text-center pt-0.5">
+              <button
+                type="button"
+                onClick={() => {
+                  setIsSignUpMode((prev) => !prev);
+                  setLoginError('');
+                  setLoginInfo('');
+                }}
+                className="text-xs font-bold text-[#19154E] underline hover:opacity-80"
+              >
+                {isSignUpMode
+                  ? 'Already registered on Supabase? Sign in instead'
+                  : 'First time on new Supabase? Create Superuser Account'}
+              </button>
+            </div>
           </form>
 
           <div className="pt-2 border-t border-neutral-200 text-center">
