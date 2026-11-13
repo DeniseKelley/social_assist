@@ -5,7 +5,6 @@ import {
   Sparkles,
   Upload,
   Film,
-  Images,
   Image as ImageIcon,
   FileText,
   Clock,
@@ -17,13 +16,101 @@ import {
   ChevronRight,
   KeyRound,
   ExternalLink,
-  Zap,
   X,
-  CheckCircle2,
   Layers,
   Flame,
   Eye,
+  Cloud,
+  RefreshCw,
+  Database,
 } from 'lucide-react';
+import { supabase } from './supabase';
+
+const TEMP_BUCKET = 'scheduled-media';
+const MAX_TEMP_FILE_BYTES = 50 * 1024 * 1024; // 50 MB Supabase Free Tier cap
+
+export const SUPABASE_SETUP_SQL = `-- SocialAssist: Temporary Media Storage & Multi-Platform Scheduler Setup
+-- Paste into Supabase SQL Editor -> Click "Run"
+
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values (
+  'scheduled-media',
+  'scheduled-media',
+  true,
+  52428800,
+  array['video/mp4','video/quicktime','video/webm','image/jpeg','image/png','image/webp','image/gif']
+)
+on conflict (id) do update set
+  public = excluded.public,
+  file_size_limit = excluded.file_size_limit,
+  allowed_mime_types = excluded.allowed_mime_types;
+
+drop policy if exists "Public can fetch pending scheduled media" on storage.objects;
+create policy "Public can fetch pending scheduled media"
+  on storage.objects for select using (bucket_id = 'scheduled-media');
+
+drop policy if exists "Users upload own temp scheduled media" on storage.objects;
+create policy "Users upload own temp scheduled media"
+  on storage.objects for insert to authenticated
+  with check (bucket_id = 'scheduled-media' and (storage.foldername(name))[1] = auth.uid()::text);
+
+drop policy if exists "Users update own temp scheduled media" on storage.objects;
+create policy "Users update own temp scheduled media"
+  on storage.objects for update to authenticated
+  using (bucket_id = 'scheduled-media' and (storage.foldername(name))[1] = auth.uid()::text);
+
+drop policy if exists "Users delete own temp scheduled media" on storage.objects;
+create policy "Users delete own temp scheduled media"
+  on storage.objects for delete to authenticated
+  using (bucket_id = 'scheduled-media' and (storage.foldername(name))[1] = auth.uid()::text);
+
+create table if not exists public.scheduled_posts (
+  id text primary key,
+  user_id uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  title text not null default '',
+  caption text not null default '',
+  captions jsonb not null default '{}'::jsonb,
+  format text not null default 'video',
+  platforms jsonb not null default '["instagram"]'::jsonb,
+  media_urls jsonb not null default '[]'::jsonb,
+  storage_paths jsonb not null default '[]'::jsonb,
+  scheduled_date text not null default '',
+  scheduled_time text not null default '18:00',
+  scheduled_at timestamptz not null default now(),
+  expires_at timestamptz not null default (now() + interval '48 hours'),
+  status text not null default 'scheduled',
+  first_comment text not null default '',
+  auto_dm_keyword text not null default '',
+  auto_dm_url text not null default '',
+  auto_cleanup boolean not null default true,
+  media_cleaned_up boolean not null default false,
+  dispatch_results jsonb not null default '[]'::jsonb,
+  last_dispatched_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists idx_scheduled_posts_due on public.scheduled_posts (status, scheduled_at);
+create index if not exists idx_scheduled_posts_expiry on public.scheduled_posts (media_cleaned_up, expires_at);
+alter table public.scheduled_posts enable row level security;
+
+drop policy if exists "Users manage own scheduled posts" on public.scheduled_posts;
+create policy "Users manage own scheduled posts"
+  on public.scheduled_posts for all to authenticated
+  using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+create table if not exists public.user_platform_tokens (
+  user_id uuid primary key default auth.uid() references auth.users(id) on delete cascade,
+  tokens jsonb not null default '{}'::jsonb,
+  updated_at timestamptz not null default now()
+);
+
+alter table public.user_platform_tokens enable row level security;
+
+drop policy if exists "Users manage own platform tokens" on public.user_platform_tokens;
+create policy "Users manage own platform tokens"
+  on public.user_platform_tokens for all to authenticated
+  using (auth.uid() = user_id) with check (auth.uid() = user_id);`;
 
 export const PLATFORMS = [
   {
@@ -121,7 +208,6 @@ const FORMAT_OPTIONS = [
   { id: 'text', label: 'Text / Thread', sub: 'No media needed', icon: FileText },
 ];
 
-// Metricool-inspired US Creator Peak Windows by Day of Week (0 = Sun ... 6 = Sat)
 const PEAK_WINDOWS_BY_DOW = {
   0: { time: '17:30', label: '5:30 PM EST', score: 96, tag: '🔥 Sun Prime' },
   1: { time: '12:15', label: '12:15 PM EST', score: 88, tag: '⚡ Lunch Scroll' },
@@ -155,6 +241,33 @@ function formatTime12h(hhmm) {
   const suffix = h >= 12 ? 'PM' : 'AM';
   h = h % 12 || 12;
   return `${h}:${mStr} ${suffix}`;
+}
+
+function buildScheduledIso(dateStr, timeStr) {
+  const cleanDate = dateStr || toDateKey(new Date());
+  const cleanTime = timeStr && timeStr.includes(':') ? timeStr : '18:00';
+  const dt = new Date(`${cleanDate}T${cleanTime}:00`);
+  return Number.isNaN(dt.getTime()) ? new Date().toISOString() : dt.toISOString();
+}
+
+function hydrateMediaItemsFromRow(row) {
+  if (Array.isArray(row.media_items) && row.media_items.length > 0) {
+    return row.media_items;
+  }
+  const urls = Array.isArray(row.media_urls) ? row.media_urls : [];
+  const paths = Array.isArray(row.storage_paths) ? row.storage_paths : [];
+  return urls.map((url, idx) => {
+    const isVid =
+      /\.(mp4|mov|webm|m4v)(\?|$)/i.test(url) || (row.format === 'video' && urls.length === 1);
+    return {
+      id: `cloud-${row.id}-${idx}`,
+      url,
+      type: isVid ? 'video' : 'image',
+      name: (paths[idx] || url).split('/').pop()?.split('?')[0] || `Slide ${idx + 1}`,
+      isRemote: true,
+      storagePath: paths[idx] || '',
+    };
+  });
 }
 
 function adaptCaptionForPlatform(platformId, baseCaption, dmKeyword) {
@@ -229,6 +342,12 @@ export default function PlannerCalendar({
   const [platformTokens, setPlatformTokens] = useState({});
   const [showTokensModal, setShowTokensModal] = useState(false);
 
+  // Supabase Temporary Cloud Storage & Queue state
+  const [supabaseUser, setSupabaseUser] = useState(null);
+  const [supabaseStatus, setSupabaseStatus] = useState('checking'); // 'checking' | 'connected' | 'needs_setup'
+  const [showSetupSqlModal, setShowSetupSqlModal] = useState(false);
+  const [uploadingCount, setUploadingCount] = useState(0);
+
   // Composer Modal State
   const [composerOpen, setComposerOpen] = useState(false);
   const [editingId, setEditingId] = useState(null);
@@ -241,7 +360,8 @@ export default function PlannerCalendar({
   const [firstComment, setFirstComment] = useState('');
   const [scheduledDate, setScheduledDate] = useState(todayKey);
   const [scheduledTime, setScheduledTime] = useState('18:00');
-  const [mediaItems, setMediaItems] = useState([]); // [{ id, url, type: 'video'|'image', name, isRemote }]
+  const [autoCleanup, setAutoCleanup] = useState(true);
+  const [mediaItems, setMediaItems] = useState([]); // [{ id, url, type, name, isRemote, storagePath, uploading }]
   const [remoteUrlInput, setRemoteUrlInput] = useState('');
   const [previewPlatform, setPreviewPlatform] = useState('instagram');
   const [previewSlideIdx, setPreviewSlideIdx] = useState(0);
@@ -255,8 +375,60 @@ export default function PlannerCalendar({
   const [draggedPostId, setDraggedPostId] = useState(null);
   const [copiedId, setCopiedId] = useState(null);
   const fileInputRef = useRef(null);
+  const autoDispatchingIdsRef = useRef(new Set());
+  const postsRef = useRef(posts);
+  postsRef.current = posts;
 
-  // Load saved scheduled posts & platform tokens from scoped storage (+ sync from local FastAPI if running)
+  const checkAndLoadSupabase = async () => {
+    setSupabaseStatus('checking');
+    try {
+      const { data: userRes } = await supabase.auth.getUser();
+      const user = userRes?.user || null;
+      setSupabaseUser(user);
+
+      if (!user) {
+        setSupabaseStatus('needs_setup');
+        return;
+      }
+
+      const { data: rows, error } = await supabase
+        .from('scheduled_posts')
+        .select('*')
+        .order('scheduled_at', { ascending: true });
+
+      if (error) {
+        setSupabaseStatus('needs_setup');
+        return;
+      }
+
+      setSupabaseStatus('connected');
+      if (Array.isArray(rows) && rows.length > 0) {
+        const hydrated = rows.map((r) => ({
+          ...r,
+          media_items: hydrateMediaItemsFromRow(r),
+        }));
+        setPosts(hydrated);
+        localStorage.setItem(scopedKey('sa_scheduled_posts'), JSON.stringify(hydrated));
+      }
+
+      const { data: tokRow } = await supabase
+        .from('user_platform_tokens')
+        .select('tokens')
+        .eq('user_id', user.id)
+        .maybeSingle();
+
+      if (tokRow?.tokens && typeof tokRow.tokens === 'object') {
+        setPlatformTokens((prev) => {
+          const merged = { ...prev, ...tokRow.tokens };
+          localStorage.setItem(scopedKey('sa_platform_tokens'), JSON.stringify(merged));
+          return merged;
+        });
+      }
+    } catch {
+      setSupabaseStatus('needs_setup');
+    }
+  };
+
   useEffect(() => {
     const savedPostsRaw = localStorage.getItem(scopedKey('sa_scheduled_posts'));
     if (savedPostsRaw) {
@@ -264,52 +436,8 @@ export default function PlannerCalendar({
         const parsed = JSON.parse(savedPostsRaw);
         if (Array.isArray(parsed)) setPosts(parsed);
       } catch {
-        // ignore malformed cache
+        // ignore malformed local cache
       }
-    } else {
-      // Seed 2 helpful starter examples on upcoming peak slots so the calendar feels alive immediately
-      const tomorrow = new Date(today);
-      tomorrow.setDate(today.getDate() + 1);
-      const twoDaysOut = new Date(today);
-      twoDaysOut.setDate(today.getDate() + 3);
-      const starter = [
-        {
-          id: 'seed-post-1',
-          title: 'Behind-the-scenes Reel: Building SocialAssist Studio ✨',
-          caption:
-            'How I plan & cross-post my Reels + automated DMs from one dashboard 🧚‍♀️✨\n\nComment "STUDIO" and I will DM you the workflow!',
-          captions: {},
-          format: 'video',
-          platforms: ['instagram', 'tiktok', 'youtube'],
-          media_items: [],
-          media_urls: [],
-          scheduled_date: toDateKey(tomorrow),
-          scheduled_time: PEAK_WINDOWS_BY_DOW[tomorrow.getDay()]?.time || '18:00',
-          status: 'scheduled',
-          first_comment: 'Drop STUDIO below and check your DMs! 💌',
-          auto_dm_keyword: 'STUDIO',
-          created_at: new Date().toISOString(),
-        },
-        {
-          id: 'seed-post-2',
-          title: '5-Slide Carousel: Hook Formulas That Tripled Saves',
-          caption:
-            'Swipe through the 5 Reel & Carousel hook formulas driving our highest save-to-view ratio 📊👉',
-          captions: {},
-          format: 'carousel',
-          platforms: ['instagram', 'linkedin', 'threads', 'x'],
-          media_items: [],
-          media_urls: [],
-          scheduled_date: toDateKey(twoDaysOut),
-          scheduled_time: PEAK_WINDOWS_BY_DOW[twoDaysOut.getDay()]?.time || '18:00',
-          status: 'scheduled',
-          first_comment: '',
-          auto_dm_keyword: '',
-          created_at: new Date().toISOString(),
-        },
-      ];
-      setPosts(starter);
-      localStorage.setItem(scopedKey('sa_scheduled_posts'), JSON.stringify(starter));
     }
 
     const savedTokensRaw = localStorage.getItem(scopedKey('sa_platform_tokens'));
@@ -320,20 +448,94 @@ export default function PlannerCalendar({
         setPlatformTokens({});
       }
     }
+
+    checkAndLoadSupabase();
   }, [scopedKey]);
 
-  const persistPosts = (nextPosts) => {
+  // Live Browser Auto-Scheduler: checks every 25s for due `scheduled` posts & fires them automatically!
+  useEffect(() => {
+    const checkDuePosts = () => {
+      const nowMs = Date.now();
+      const currentList = postsRef.current || [];
+      currentList.forEach((p) => {
+        if (p.status !== 'scheduled') return;
+        if (autoDispatchingIdsRef.current.has(p.id)) return;
+        const targetIso = p.scheduled_at || buildScheduledIso(p.scheduled_date, p.scheduled_time);
+        const dueMs = new Date(targetIso).getTime();
+        if (!Number.isNaN(dueMs) && dueMs <= nowMs) {
+          autoDispatchingIdsRef.current.add(p.id);
+          handlePublishNow(p, { isAutoScheduled: true }).finally(() => {
+            autoDispatchingIdsRef.current.delete(p.id);
+          });
+        }
+      });
+    };
+
+    const timer = setInterval(checkDuePosts, 25000);
+    return () => clearInterval(timer);
+  }, [platformTokens, sharedTokensMap, igAccessToken]);
+
+  const persistPostsLocal = (nextPosts) => {
     setPosts(nextPosts);
-    // Avoid storing huge base64 blobs; keep metadata & remote URLs + session object URLs in state
-    const serializable = nextPosts.map((p) => ({
-      ...p,
-      media_items: (p.media_items || []).map((m) => ({
-        ...m,
-        // blob: URLs only live for the current browser tab session, which is fine and lightweight
-        url: m.url,
-      })),
-    }));
-    localStorage.setItem(scopedKey('sa_scheduled_posts'), JSON.stringify(serializable));
+    localStorage.setItem(scopedKey('sa_scheduled_posts'), JSON.stringify(nextPosts));
+  };
+
+  const upsertPostInSupabase = async (record) => {
+    if (!supabaseUser) return false;
+    try {
+      const dbRow = {
+        id: record.id,
+        user_id: supabaseUser.id,
+        title: record.title || '',
+        caption: record.caption || '',
+        captions: record.captions || {},
+        format: record.format || 'video',
+        platforms: record.platforms || ['instagram'],
+        media_urls: record.media_urls || [],
+        storage_paths: record.storage_paths || [],
+        scheduled_date: record.scheduled_date || todayKey,
+        scheduled_time: record.scheduled_time || '18:00',
+        scheduled_at:
+          record.scheduled_at || buildScheduledIso(record.scheduled_date, record.scheduled_time),
+        expires_at:
+          record.expires_at ||
+          new Date(
+            new Date(
+              record.scheduled_at || buildScheduledIso(record.scheduled_date, record.scheduled_time)
+            ).getTime() +
+              48 * 3600 * 1000
+          ).toISOString(),
+        status: record.status || 'scheduled',
+        first_comment: record.first_comment || '',
+        auto_dm_keyword: record.auto_dm_keyword || '',
+        auto_dm_url: record.auto_dm_url || '',
+        auto_cleanup: record.auto_cleanup !== false,
+        media_cleaned_up: Boolean(record.media_cleaned_up),
+        dispatch_results: record.dispatch_results || [],
+        last_dispatched_at: record.last_dispatched_at || null,
+        updated_at: new Date().toISOString(),
+      };
+      const { error } = await supabase.from('scheduled_posts').upsert(dbRow, { onConflict: 'id' });
+      if (!error) {
+        setSupabaseStatus('connected');
+        return true;
+      }
+    } catch {
+      // fallback to local
+    }
+    return false;
+  };
+
+  const deleteTempStoragePaths = async (paths) => {
+    const cleanPaths = (paths || []).filter((p) => typeof p === 'string' && p.trim().length > 0);
+    if (cleanPaths.length === 0) return 0;
+    try {
+      const { error } = await supabase.storage.from(TEMP_BUCKET).remove(cleanPaths);
+      if (!error) return cleanPaths.length;
+    } catch {
+      // ignore if already removed
+    }
+    return 0;
   };
 
   const isPlatformLiveReady = (platformId) => {
@@ -365,6 +567,7 @@ export default function PlannerCalendar({
     setFirstComment('');
     setScheduledDate(dateKey || todayKey);
     setScheduledTime(defaultTime || peak);
+    setAutoCleanup(true);
     setMediaItems([]);
     setRemoteUrlInput('');
     setPreviewPlatform('instagram');
@@ -386,7 +589,8 @@ export default function PlannerCalendar({
     setFirstComment(post.first_comment || '');
     setScheduledDate(post.scheduled_date || todayKey);
     setScheduledTime(post.scheduled_time || '18:00');
-    setMediaItems(post.media_items || []);
+    setAutoCleanup(post.auto_cleanup !== false);
+    setMediaItems(hydrateMediaItemsFromRow(post));
     setRemoteUrlInput('');
     setPreviewPlatform(plats[0] || 'instagram');
     setPreviewSlideIdx(0);
@@ -399,7 +603,7 @@ export default function PlannerCalendar({
   const togglePlatform = (platformId) => {
     setSelectedPlatforms((prev) => {
       if (prev.includes(platformId)) {
-        if (prev.length === 1) return prev; // Keep at least 1 selected
+        if (prev.length === 1) return prev;
         const next = prev.filter((p) => p !== platformId);
         if (previewPlatform === platformId) setPreviewPlatform(next[0]);
         return next;
@@ -408,32 +612,103 @@ export default function PlannerCalendar({
     });
   };
 
-  const handleFilesSelected = (fileList) => {
+  // Upload files directly to Supabase temporary `scheduled-media` bucket!
+  const handleFilesSelected = async (fileList) => {
     const files = Array.from(fileList || []);
     if (files.length === 0) return;
 
-    const added = files.map((file, idx) => {
+    const oversized = files.find((f) => f.size > MAX_TEMP_FILE_BYTES);
+    if (oversized) {
+      showToast(
+        `"${oversized.name}" exceeds Supabase Free Tier's 50 MB file limit — compress slightly or paste a hosted link.`,
+        'error'
+      );
+      return;
+    }
+
+    const batchTs = Date.now();
+    const initialSlides = files.map((file, idx) => {
       const isVid = file.type.startsWith('video/');
       return {
-        id: `local-${Date.now()}-${idx}`,
+        id: `upload-${batchTs}-${idx}`,
         url: URL.createObjectURL(file),
         type: isVid ? 'video' : 'image',
         name: file.name,
         isRemote: false,
+        storagePath: '',
+        uploading: Boolean(supabaseUser),
+        _rawFile: file,
       };
     });
 
     setMediaItems((prev) => {
-      const combined = [...prev, ...added];
+      const combined = [...prev, ...initialSlides];
       if (combined.length > 1 && format !== 'carousel') {
         setFormat('carousel');
-      } else if (combined.length === 1 && added[0].type === 'video' && format === 'image') {
+      } else if (combined.length === 1 && initialSlides[0].type === 'video' && format === 'image') {
         setFormat('video');
-      } else if (combined.length === 1 && added[0].type === 'image' && format === 'video') {
+      } else if (combined.length === 1 && initialSlides[0].type === 'image' && format === 'video') {
         setFormat('image');
       }
       return combined;
     });
+
+    if (!supabaseUser) return;
+
+    setUploadingCount((c) => c + initialSlides.length);
+    for (let i = 0; i < initialSlides.length; i++) {
+      const slide = initialSlides[i];
+      const file = slide._rawFile;
+      const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_').slice(-60);
+      const storagePath = `${supabaseUser.id}/${batchTs}-${i}-${safeName}`;
+
+      try {
+        const { error: upErr } = await supabase.storage
+          .from(TEMP_BUCKET)
+          .upload(storagePath, file, {
+            cacheControl: '3600',
+            upsert: true,
+            contentType: file.type || undefined,
+          });
+
+        if (upErr) {
+          setSupabaseStatus('needs_setup');
+          setMediaItems((prev) =>
+            prev.map((m) => (m.id === slide.id ? { ...m, uploading: false } : m))
+          );
+          showToast(
+            'Temp bucket not initialized yet — click "Setup Temp Cloud" above to enable Supabase uploads!',
+            'error'
+          );
+        } else {
+          const { data: pubUrlData } = supabase.storage
+            .from(TEMP_BUCKET)
+            .getPublicUrl(storagePath);
+          const publicUrl = pubUrlData?.publicUrl || slide.url;
+          setSupabaseStatus('connected');
+          setMediaItems((prev) =>
+            prev.map((m) =>
+              m.id === slide.id
+                ? {
+                    ...m,
+                    url: publicUrl,
+                    isRemote: true,
+                    storagePath,
+                    uploading: false,
+                    _rawFile: undefined,
+                  }
+                : m
+            )
+          );
+        }
+      } catch {
+        setMediaItems((prev) =>
+          prev.map((m) => (m.id === slide.id ? { ...m, uploading: false } : m))
+        );
+      } finally {
+        setUploadingCount((c) => Math.max(0, c - 1));
+      }
+    }
   };
 
   const handleAddRemoteUrl = () => {
@@ -446,6 +721,8 @@ export default function PlannerCalendar({
       type: isVid ? 'video' : 'image',
       name: clean.split('/').pop()?.split('?')[0] || 'Hosted Media',
       isRemote: true,
+      storagePath: '',
+      uploading: false,
     };
     setMediaItems((prev) => {
       const next = [...prev, item];
@@ -466,9 +743,12 @@ export default function PlannerCalendar({
     });
   };
 
-  const removeSlide = (id) => {
+  const removeSlide = async (slide) => {
+    if (slide?.storagePath) {
+      await deleteTempStoragePaths([slide.storagePath]);
+    }
     setMediaItems((prev) => {
-      const next = prev.filter((m) => m.id !== id);
+      const next = prev.filter((m) => m.id !== slide.id);
       if (previewSlideIdx >= next.length) {
         setPreviewSlideIdx(Math.max(0, next.length - 1));
       }
@@ -500,7 +780,12 @@ export default function PlannerCalendar({
       title.trim() ||
       masterCaption.trim().split('\n')[0]?.slice(0, 60) ||
       `${format.toUpperCase()} Cross-Post`;
-    const publicUrls = mediaItems.filter((m) => m.isRemote).map((m) => m.url);
+    const cleanSlides = mediaItems.map(({ _rawFile, ...rest }) => rest);
+    const publicUrls = cleanSlides
+      .filter((m) => m.isRemote && /^https?:\/\//i.test(m.url))
+      .map((m) => m.url);
+    const storagePaths = cleanSlides.map((m) => m.storagePath).filter(Boolean);
+    const schedIso = buildScheduledIso(scheduledDate, scheduledTime);
 
     return {
       id,
@@ -509,14 +794,19 @@ export default function PlannerCalendar({
       captions: captionOverrides,
       format,
       platforms: selectedPlatforms,
-      media_items: mediaItems,
+      media_items: cleanSlides,
       media_urls: publicUrls,
+      storage_paths: storagePaths,
       scheduled_date: scheduledDate,
       scheduled_time: scheduledTime,
+      scheduled_at: schedIso,
+      expires_at: new Date(new Date(schedIso).getTime() + 48 * 3600 * 1000).toISOString(),
       status: statusOverride,
       first_comment: firstComment,
       auto_dm_keyword: attachDmTrigger ? dmKeyword.trim().toUpperCase() : '',
       auto_dm_url: attachDmTrigger ? dmTargetUrl.trim() : '',
+      auto_cleanup: autoCleanup,
+      media_cleaned_up: false,
       updated_at: new Date().toISOString(),
     };
   };
@@ -537,6 +827,7 @@ export default function PlannerCalendar({
   };
 
   const syncPostToBackend = async (record) => {
+    await upsertPostInSupabase(record);
     try {
       await fetch('/api/planner/posts', {
         method: 'POST',
@@ -558,17 +849,21 @@ export default function PlannerCalendar({
         }),
       });
     } catch {
-      // Safe fallback when deployed purely statically on Vercel without FastAPI /api/planner/posts
+      // Safe fallback when deployed on Vercel without FastAPI local server
     }
   };
 
   const handleSaveScheduleOrDraft = async (targetStatus = 'scheduled') => {
+    if (uploadingCount > 0) {
+      showToast('Hang tight — temporary media is still uploading to Supabase!', 'error');
+      return;
+    }
     const record = buildPostRecord(targetStatus);
     const exists = posts.some((p) => p.id === record.id);
     const next = exists
       ? posts.map((p) => (p.id === record.id ? { ...p, ...record } : p))
       : [record, ...posts];
-    persistPosts(next);
+    persistPostsLocal(next);
     await syncPostToBackend(record);
     if (targetStatus === 'scheduled') {
       maybeRegisterDmTrigger(record);
@@ -584,7 +879,11 @@ export default function PlannerCalendar({
     );
   };
 
-  const handlePublishNow = async (postInput) => {
+  const handlePublishNow = async (postInput, { isAutoScheduled = false } = {}) => {
+    if (!postInput && uploadingCount > 0) {
+      showToast('Wait a moment for your video/slides to finish uploading to Supabase!', 'error');
+      return;
+    }
     const record = postInput || buildPostRecord('publishing');
     setPublishing(true);
     try {
@@ -626,7 +925,7 @@ export default function PlannerCalendar({
           dispatchData = await resp.json();
         }
       } catch {
-        // Local fallback if offline
+        // Offline fallback
       }
 
       const results =
@@ -642,32 +941,50 @@ export default function PlannerCalendar({
       const finalStatus =
         dispatchData?.overall_status || (liveCount > 0 ? 'published' : 'queued');
 
+      // Automatically purge temporary Supabase Storage files once live publish completes!
+      let cleanedUp = Boolean(record.media_cleaned_up);
+      if (
+        record.auto_cleanup !== false &&
+        finalStatus === 'published' &&
+        Array.isArray(record.storage_paths) &&
+        record.storage_paths.length > 0
+      ) {
+        const removed = await deleteTempStoragePaths(record.storage_paths);
+        if (removed > 0) cleanedUp = true;
+      }
+
       const updatedRecord = {
         ...record,
         status: finalStatus,
         dispatch_results: results,
         last_dispatched_at: new Date().toISOString(),
+        media_cleaned_up: cleanedUp,
+        ...(cleanedUp ? { media_urls: [], storage_paths: [], media_items: [] } : {}),
       };
 
-      const exists = posts.some((p) => p.id === updatedRecord.id);
+      const prevList = postsRef.current || posts;
+      const exists = prevList.some((p) => p.id === updatedRecord.id);
       const next = exists
-        ? posts.map((p) => (p.id === updatedRecord.id ? updatedRecord : p))
-        : [updatedRecord, ...posts];
-      persistPosts(next);
+        ? prevList.map((p) => (p.id === updatedRecord.id ? updatedRecord : p))
+        : [updatedRecord, ...prevList];
+      persistPostsLocal(next);
       await syncPostToBackend(updatedRecord);
-      maybeRegisterDmTrigger(updatedRecord);
+      if (!postInput) {
+        maybeRegisterDmTrigger(updatedRecord);
+        setComposerOpen(false);
+      }
       triggerFairyWand?.();
-      setComposerOpen(false);
 
+      const prefix = isAutoScheduled ? '⏰ Scheduled Auto-Post: ' : '';
       if (liveCount > 0) {
         showToast(
-          `Published live to ${liveCount} platform(s) (${
-            results.length - liveCount
-          } queued in preview mode)!`
+          `${prefix}Published live to ${liveCount} platform(s)${
+            cleanedUp ? ' & purged temp Supabase media!' : '!'
+          }`
         );
       } else {
         showToast(
-          `Queued across ${results.length} platform(s)! Connect API keys anytime for live auto-post.`
+          `${prefix}Queued across ${results.length} platform(s)! Connect API keys anytime for live auto-post.`
         );
       }
     } finally {
@@ -675,66 +992,108 @@ export default function PlannerCalendar({
     }
   };
 
+  const handleManualPurgeMedia = async (post, e) => {
+    if (e) e.stopPropagation();
+    const paths = post.storage_paths || [];
+    if (paths.length === 0) return;
+    await deleteTempStoragePaths(paths);
+    const updated = {
+      ...post,
+      media_cleaned_up: true,
+      storage_paths: [],
+      media_urls: [],
+      media_items: [],
+    };
+    const next = posts.map((p) => (p.id === post.id ? updated : p));
+    persistPostsLocal(next);
+    await upsertPostInSupabase(updated);
+    showToast('Purged temporary media files from Supabase Storage!');
+  };
+
   const handleDeletePost = async (postId, e) => {
     if (e) e.stopPropagation();
+    const target = posts.find((p) => p.id === postId);
+    if (target?.storage_paths?.length) {
+      await deleteTempStoragePaths(target.storage_paths);
+    }
     const next = posts.filter((p) => p.id !== postId);
-    persistPosts(next);
+    persistPostsLocal(next);
+    if (supabaseUser) {
+      supabase.from('scheduled_posts').delete().eq('id', postId).then(() => {});
+    }
     fetch(`/api/planner/posts/${encodeURIComponent(postId)}`, { method: 'DELETE' }).catch(() => {});
     if (editingId === postId) setComposerOpen(false);
-    showToast('Removed post from calendar.');
+    showToast('Removed post & cleaned up any temporary cloud files.');
   };
 
   const handleDropOnDate = (targetDateKey) => {
     if (!draggedPostId) return;
     const next = posts.map((p) =>
-      p.id === draggedPostId ? { ...p, scheduled_date: targetDateKey } : p
+      p.id === draggedPostId
+        ? {
+            ...p,
+            scheduled_date: targetDateKey,
+            scheduled_at: buildScheduledIso(targetDateKey, p.scheduled_time),
+          }
+        : p
     );
-    persistPosts(next);
+    persistPostsLocal(next);
     const moved = next.find((p) => p.id === draggedPostId);
     if (moved) {
       syncPostToBackend(moved);
-      showToast(`Moved "${moved.title.slice(0, 28)}" to ${targetDateKey}!`);
+      showToast(`Rescheduled "${moved.title.slice(0, 28)}" to ${targetDateKey}!`);
     }
     setDraggedPostId(null);
   };
 
-  const handleSaveTokens = (e) => {
+  const handleSaveTokens = async (e) => {
     e.preventDefault();
     localStorage.setItem(scopedKey('sa_platform_tokens'), JSON.stringify(platformTokens));
+    if (supabaseUser) {
+      await supabase
+        .from('user_platform_tokens')
+        .upsert(
+          {
+            user_id: supabaseUser.id,
+            tokens: platformTokens,
+            updated_at: new Date().toISOString(),
+          },
+          { onConflict: 'user_id' }
+        )
+        .catch(() => {});
+    }
     setShowTokensModal(false);
-    showToast('Saved multi-platform API settings in your workspace!');
+    showToast('Saved multi-platform API settings to your workspace!');
   };
 
-  const copyCaptionToClipboard = (text, key) => {
+  const copyText = (text, key, msg = 'Copied to clipboard!') => {
     navigator.clipboard?.writeText(text || '');
     setCopiedId(key);
     setTimeout(() => setCopiedId(null), 1800);
-    showToast('Caption copied to clipboard!');
+    showToast(msg);
   };
 
-  // Build Month Calendar Grid (42 cells / 6 weeks max)
+  // Build Month Calendar Grid
   const year = cursorDate.getFullYear();
   const month = cursorDate.getMonth();
   const firstDayOfMonth = new Date(year, month, 1);
-  const startOffset = firstDayOfMonth.getDay(); // Sunday = 0
+  const startOffset = firstDayOfMonth.getDay();
   const daysInMonth = new Date(year, month + 1, 0).getDate();
   const totalCells = Math.ceil((startOffset + daysInMonth) / 7) * 7;
 
   const calendarCells = Array.from({ length: totalCells }, (_, idx) => {
     const cellDate = new Date(year, month, idx - startOffset + 1);
     const dateKey = toDateKey(cellDate);
-    const inCurrentMonth = cellDate.getMonth() === month;
     return {
       date: cellDate,
       dateKey,
       dayNumber: cellDate.getDate(),
-      inCurrentMonth,
+      inCurrentMonth: cellDate.getMonth() === month,
       isToday: dateKey === todayKey,
       peak: PEAK_WINDOWS_BY_DOW[cellDate.getDay()],
     };
   });
 
-  // Build 7-Day Week Strip centered on current week (or cursor month)
   const startOfCurrentWeek = (() => {
     const base =
       cursorDate.getMonth() === today.getMonth() && cursorDate.getFullYear() === today.getFullYear()
@@ -773,12 +1132,105 @@ export default function PlannerCalendar({
     year: 'numeric',
   });
 
+  const activeTempFilesCount = posts.reduce(
+    (sum, p) => sum + ((p.storage_paths || []).length || 0),
+    0
+  );
   const activePreviewCaption =
     captionOverrides[previewPlatform] ?? masterCaption ?? 'Your cross-platform caption preview...';
   const currentSlide = mediaItems[previewSlideIdx] || mediaItems[0] || null;
 
   return (
     <div className="space-y-6 panel-enter">
+      {/* ============================================================
+          SUPABASE TEMP CLOUD STORAGE STATUS / 1-CLICK SQL SETUP BAR
+      ============================================================ */}
+      {supabaseStatus === 'needs_setup' ? (
+        <div className="editorial-card p-4 sm:p-5 bg-[#FFF0F7] flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <div className="w-10 h-10 rounded-2xl bg-[#C8F904] border-2 border-[#19154E] flex items-center justify-center shrink-0">
+              <Database className="w-5 h-5 text-[#19154E]" />
+            </div>
+            <div>
+              <h4 className="font-display font-bold text-sm sm:text-base text-[#19154E]">
+                ⚡ Enable Supabase Temporary Video Storage &amp; Cloud Scheduler (1-Time SQL)
+              </h4>
+              <p className="text-xs text-neutral-700 mt-0.5">
+                Creates your private <code className="font-mono-code font-bold">scheduled-media</code> bucket &amp;{' '}
+                <code className="font-mono-code font-bold">scheduled_posts</code> queue. Videos upload temporarily so Instagram/TikTok can pull them, then <strong>auto-delete right after publishing</strong>!
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() =>
+                copyText(
+                  SUPABASE_SETUP_SQL,
+                  'setup-sql',
+                  'Copied Supabase Setup SQL! Paste it into Supabase SQL Editor & click Run.'
+                )
+              }
+              className="editorial-btn px-3.5 py-2 rounded-xl bg-[#C8F904] text-[#19154E] text-xs font-bold flex items-center gap-1.5"
+            >
+              {copiedId === 'setup-sql' ? (
+                <Check className="w-3.5 h-3.5" />
+              ) : (
+                <Copy className="w-3.5 h-3.5" />
+              )}
+              <span>{copiedId === 'setup-sql' ? 'Copied SQL!' : '1. Copy Setup SQL'}</span>
+            </button>
+
+            <a
+              href="https://supabase.com/dashboard/project/ttmtmsafqmfjdkbtjglv/sql/new"
+              target="_blank"
+              rel="noreferrer"
+              className="editorial-btn px-3.5 py-2 rounded-xl bg-white text-[#19154E] text-xs font-bold flex items-center gap-1.5"
+            >
+              <span>2. Open SQL Editor</span>
+              <ExternalLink className="w-3.5 h-3.5" />
+            </a>
+
+            <button
+              type="button"
+              onClick={checkAndLoadSupabase}
+              className="editorial-btn px-3 py-2 rounded-xl bg-[#19154E] text-white text-xs font-bold flex items-center gap-1.5"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              <span>Verify</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setShowSetupSqlModal(true)}
+              className="text-xs font-bold underline text-[#19154E] px-1"
+            >
+              View SQL
+            </button>
+          </div>
+        </div>
+      ) : supabaseStatus === 'connected' ? (
+        <div className="editorial-card-sm px-4 py-2.5 bg-[#F5EEFF] flex flex-wrap items-center justify-between gap-2 text-xs">
+          <div className="flex items-center gap-2 font-bold text-[#19154E]">
+            <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 border border-[#19154E]" />
+            <Cloud className="w-4 h-4 text-[#19154E]" />
+            <span>Supabase Temp Storage &amp; Auto-Scheduler Connected</span>
+            <span className="text-neutral-600 font-medium">
+              • {activeTempFilesCount} temp file(s) currently staged (auto-purged after live publish)
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={checkAndLoadSupabase}
+            className="px-2.5 py-1 rounded-lg bg-white border border-[#19154E] font-bold hover:bg-[#C8F904] flex items-center gap-1"
+          >
+            <RefreshCw className="w-3 h-3" />
+            <span>Sync Queue</span>
+          </button>
+        </div>
+      ) : null}
+
       {/* ============================================================
           TOP PLANNER COMMAND BAR
       ============================================================ */}
@@ -787,15 +1239,13 @@ export default function PlannerCalendar({
           <div>
             <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-[#C8F904] border-2 border-[#19154E] text-xs font-bold mb-2">
               <CalendarIcon className="w-3.5 h-3.5" />
-              <span>Multi-Platform Content Calendar &amp; Cross-Poster</span>
+              <span>Multi-Platform Content Calendar &amp; Temp Cloud Auto-Poster</span>
             </div>
             <h3 className="font-display text-2xl sm:text-3xl font-bold text-[#19154E]">
-              Upload once. Schedule or post everywhere.
+              Upload once. Schedule &amp; auto-post everywhere.
             </h3>
             <p className="text-xs sm:text-sm text-neutral-600 mt-0.5">
-              Click any day slot to drop a <strong>Video/Reel</strong>, <strong>Carousel</strong>, or{' '}
-              <strong>Post</strong> across Instagram, TikTok, YouTube Shorts, Threads, X, LinkedIn &amp; Facebook.
-              Drag cards between days to reschedule.
+              Drop a <strong>Video/Reel</strong>, <strong>Carousel</strong>, or <strong>Post</strong> — files stage temporarily in Supabase so platforms can ingest them at your scheduled time, then auto-delete to save storage.
             </p>
           </div>
 
@@ -892,7 +1342,6 @@ export default function PlannerCalendar({
           CALENDAR BODY (MONTH GRID OR 7-DAY BEST-TIME HEATMAP)
       ============================================================ */}
       <div className="editorial-card p-4 sm:p-6 bg-white">
-        {/* Month Switcher Header */}
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-2">
             <button
@@ -926,7 +1375,7 @@ export default function PlannerCalendar({
           <div className="hidden md:flex items-center gap-3 text-xs font-semibold text-neutral-600">
             <span className="inline-flex items-center gap-1.5">
               <span className="w-2.5 h-2.5 rounded-full bg-[#C8F904] border border-[#19154E]" />
-              Published / Live
+              Published Live
             </span>
             <span className="inline-flex items-center gap-1.5">
               <span className="w-2.5 h-2.5 rounded-full bg-[#FF7EB6] border border-[#19154E]" />
@@ -941,7 +1390,6 @@ export default function PlannerCalendar({
 
         {viewMode === 'month' ? (
           <>
-            {/* Day-of-week Header */}
             <div className="grid grid-cols-7 gap-2 mb-2">
               {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((d) => (
                 <div
@@ -953,7 +1401,6 @@ export default function PlannerCalendar({
               ))}
             </div>
 
-            {/* 7-Column Calendar Cells */}
             <div className="grid grid-cols-1 sm:grid-cols-7 gap-2.5">
               {calendarCells.map((cell) => {
                 const dayPosts = (postsByDate[cell.dateKey] || []).sort((a, b) =>
@@ -973,7 +1420,6 @@ export default function PlannerCalendar({
                         : 'bg-neutral-100/70 border-neutral-300 opacity-60'
                     }`}
                   >
-                    {/* Top Row: Day number + Peak time hint */}
                     <div className="flex items-center justify-between gap-1 mb-2">
                       <span
                         className={`w-7 h-7 rounded-xl text-xs font-bold flex items-center justify-center border ${
@@ -993,7 +1439,6 @@ export default function PlannerCalendar({
                       </span>
                     </div>
 
-                    {/* Scheduled Post Pills inside Day */}
                     <div className="space-y-1.5 flex-1">
                       {dayPosts.map((post) => {
                         const statusColor =
@@ -1021,7 +1466,7 @@ export default function PlannerCalendar({
                               </span>
                               <span className="uppercase px-1 rounded bg-white/80 border border-[#19154E]/40">
                                 {post.format === 'carousel'
-                                  ? `🖼️ ${post.media_items?.length || 'Multi'}`
+                                  ? `🖼️ ${post.media_items?.length || post.media_urls?.length || 'Multi'}`
                                   : post.format === 'video'
                                   ? '🎬 Video'
                                   : post.format === 'image'
@@ -1051,7 +1496,6 @@ export default function PlannerCalendar({
                       })}
                     </div>
 
-                    {/* Subtle + Add footer */}
                     <div className="pt-1.5 mt-1 flex items-center justify-between text-[10px] font-bold text-neutral-500 hover:text-[#19154E]">
                       <span>+ Add post</span>
                       <span>{formatTime12h(cell.peak?.time)}</span>
@@ -1062,12 +1506,9 @@ export default function PlannerCalendar({
             </div>
           </>
         ) : (
-          /* ============================================================
-             METRICOOL-STYLE 7x24 BEST-TIME HEATMAP + SLOT SCHEDULER
-          ============================================================ */
           <div className="space-y-3 overflow-x-auto">
             <p className="text-xs font-medium text-neutral-600">
-              Darker lime/pink cells mark peak follower scroll windows. Click any heatmap slot to schedule a multi-platform post directly into that window!
+              Darker lime/pink cells mark peak follower scroll windows. Click any heatmap slot to schedule directly into that window!
             </p>
             <div className="min-w-[680px]">
               <div className="grid grid-cols-8 gap-2 mb-2">
@@ -1134,7 +1575,7 @@ export default function PlannerCalendar({
       </div>
 
       {/* ============================================================
-          UPCOMING CROSS-PLATFORM QUEUE & QUICK DISPATCH LIST
+          UPCOMING CROSS-PLATFORM QUEUE & TEMP STORAGE STATUS LIST
       ============================================================ */}
       <div className="editorial-card p-5 sm:p-6 bg-white space-y-4">
         <div className="flex items-center justify-between">
@@ -1143,7 +1584,7 @@ export default function PlannerCalendar({
               Scheduled &amp; Cross-Posted Queue ({filteredPosts.length})
             </h4>
             <p className="text-xs text-neutral-600">
-              One-click copy captions, inspect per-platform status, or push live right now.
+              Due <code className="font-mono-code font-bold">scheduled</code> posts fire automatically on time and clean up temporary Supabase files after publishing.
             </p>
           </div>
         </div>
@@ -1151,105 +1592,131 @@ export default function PlannerCalendar({
         {filteredPosts.length === 0 ? (
           <div className="p-8 text-center rounded-2xl bg-[#FFF8FC] border-2 border-dashed border-[#19154E]/40">
             <p className="font-display font-bold text-base text-[#19154E]">
-              No posts scheduled for this filter yet!
+              No posts scheduled yet — click any day on the calendar to schedule your first Video or Carousel!
             </p>
             <button
               type="button"
               onClick={() => openComposerForSlot(todayKey, '18:00')}
               className="mt-3 editorial-btn px-4 py-2 rounded-xl bg-[#C8F904] text-xs font-bold"
             >
-              + Schedule Your First Multi-Platform Post
+              + Schedule Multi-Platform Post
             </button>
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {filteredPosts.map((post) => (
-              <div
-                key={post.id}
-                onClick={() => openComposerForEdit(post)}
-                className="editorial-card-sm p-4 bg-[#FFFDF9] cursor-pointer hover:bg-[#FFF8FC] flex flex-col justify-between gap-3"
-              >
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-xs font-mono-code font-bold px-2.5 py-0.5 rounded-lg bg-[#F5EEFF] border border-[#19154E]">
-                      📅 {post.scheduled_date} • {formatTime12h(post.scheduled_time)}
-                    </span>
-                    <div className="flex items-center gap-1.5">
-                      <span
-                        className={`text-[11px] font-bold px-2.5 py-0.5 rounded-full border border-[#19154E] uppercase ${
-                          post.status === 'published'
-                            ? 'bg-[#C8F904]'
-                            : post.status === 'queued'
-                            ? 'bg-[#E2D4FF]'
-                            : 'bg-[#FF7EB6]'
-                        }`}
-                      >
-                        {post.status}
+            {filteredPosts.map((post) => {
+              const hasTempFiles = (post.storage_paths || []).length > 0;
+              return (
+                <div
+                  key={post.id}
+                  onClick={() => openComposerForEdit(post)}
+                  className="editorial-card-sm p-4 bg-[#FFFDF9] cursor-pointer hover:bg-[#FFF8FC] flex flex-col justify-between gap-3"
+                >
+                  <div className="space-y-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-xs font-mono-code font-bold px-2.5 py-0.5 rounded-lg bg-[#F5EEFF] border border-[#19154E]">
+                        📅 {post.scheduled_date} • {formatTime12h(post.scheduled_time)}
                       </span>
-                      <button
-                        type="button"
-                        onClick={(e) => handleDeletePost(post.id, e)}
-                        className="p-1.5 rounded-lg bg-white border border-[#19154E] hover:bg-[#FFE4F1]"
-                        title="Delete post"
-                      >
-                        <Trash2 className="w-3.5 h-3.5 text-[#19154E]" />
-                      </button>
+                      <div className="flex items-center gap-1.5">
+                        {hasTempFiles && (
+                          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-white border border-[#19154E]">
+                            ☁️ {post.storage_paths.length} temp file(s)
+                          </span>
+                        )}
+                        {post.media_cleaned_up && (
+                          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 border border-[#19154E]">
+                            🧹 Temp Purged
+                          </span>
+                        )}
+                        <span
+                          className={`text-[11px] font-bold px-2.5 py-0.5 rounded-full border border-[#19154E] uppercase ${
+                            post.status === 'published'
+                              ? 'bg-[#C8F904]'
+                              : post.status === 'queued'
+                              ? 'bg-[#E2D4FF]'
+                              : 'bg-[#FF7EB6]'
+                          }`}
+                        >
+                          {post.status}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={(e) => handleDeletePost(post.id, e)}
+                          className="p-1.5 rounded-lg bg-white border border-[#19154E] hover:bg-[#FFE4F1]"
+                          title="Delete post & temporary cloud media"
+                        >
+                          <Trash2 className="w-3.5 h-3.5 text-[#19154E]" />
+                        </button>
+                      </div>
+                    </div>
+
+                    <h5 className="font-display font-bold text-base text-[#19154E]">{post.title}</h5>
+                    <p className="text-xs text-neutral-600 line-clamp-2">{post.caption}</p>
+
+                    <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                      {(post.platforms || []).map((pid) => {
+                        const meta = PLATFORMS.find((p) => p.id === pid);
+                        if (!meta) return null;
+                        return (
+                          <span
+                            key={pid}
+                            className={`text-[11px] font-bold px-2 py-0.5 rounded-lg border border-[#19154E] ${meta.badgeBg} ${meta.badgeText}`}
+                          >
+                            {meta.name}
+                          </span>
+                        );
+                      })}
+                      {post.auto_dm_keyword && (
+                        <span className="text-[11px] font-bold px-2 py-0.5 rounded-lg border border-[#19154E] bg-[#C8F904] text-[#19154E]">
+                          🧚‍♀️ Auto-DM: &ldquo;{post.auto_dm_keyword}&rdquo;
+                        </span>
+                      )}
                     </div>
                   </div>
 
-                  <h5 className="font-display font-bold text-base text-[#19154E]">{post.title}</h5>
-                  <p className="text-xs text-neutral-600 line-clamp-2">{post.caption}</p>
+                  <div
+                    className="pt-2.5 border-t border-neutral-200 flex flex-wrap items-center justify-between gap-2"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => copyText(post.caption, post.id, 'Caption copied!')}
+                        className="px-3 py-1.5 rounded-xl bg-white border-2 border-[#19154E] text-xs font-bold flex items-center gap-1.5 hover:bg-[#F5EEFF]"
+                      >
+                        {copiedId === post.id ? (
+                          <Check className="w-3.5 h-3.5 text-emerald-600" />
+                        ) : (
+                          <Copy className="w-3.5 h-3.5" />
+                        )}
+                        <span>{copiedId === post.id ? 'Copied!' : 'Copy'}</span>
+                      </button>
 
-                  <div className="flex flex-wrap items-center gap-1.5 pt-1">
-                    {(post.platforms || []).map((pid) => {
-                      const meta = PLATFORMS.find((p) => p.id === pid);
-                      if (!meta) return null;
-                      return (
-                        <span
-                          key={pid}
-                          className={`text-[11px] font-bold px-2 py-0.5 rounded-lg border border-[#19154E] ${meta.badgeBg} ${meta.badgeText}`}
+                      {hasTempFiles && (
+                        <button
+                          type="button"
+                          onClick={(e) => handleManualPurgeMedia(post, e)}
+                          className="px-2.5 py-1.5 rounded-xl bg-[#FFF8FC] border-2 border-[#19154E] text-[11px] font-bold hover:bg-[#FFE4F1]"
+                          title="Delete temporary files from Supabase Storage now"
                         >
-                          {meta.name}
-                        </span>
-                      );
-                    })}
-                    {post.auto_dm_keyword && (
-                      <span className="text-[11px] font-bold px-2 py-0.5 rounded-lg border border-[#19154E] bg-[#C8F904] text-[#19154E]">
-                        🧚‍♀️ Auto-DM: &ldquo;{post.auto_dm_keyword}&rdquo;
-                      </span>
-                    )}
+                          🧹 Free Storage
+                        </button>
+                      )}
+                    </div>
+
+                    <button
+                      type="button"
+                      disabled={publishing}
+                      onClick={() => handlePublishNow(post)}
+                      className="editorial-btn px-3.5 py-1.5 rounded-xl bg-[#C8F904] text-[#19154E] text-xs font-bold flex items-center gap-1.5"
+                    >
+                      <Send className="w-3.5 h-3.5" />
+                      <span>Publish / Push Now</span>
+                    </button>
                   </div>
                 </div>
-
-                <div
-                  className="pt-2.5 border-t border-neutral-200 flex flex-wrap items-center justify-between gap-2"
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  <button
-                    type="button"
-                    onClick={() => copyCaptionToClipboard(post.caption, post.id)}
-                    className="px-3 py-1.5 rounded-xl bg-white border-2 border-[#19154E] text-xs font-bold flex items-center gap-1.5 hover:bg-[#F5EEFF]"
-                  >
-                    {copiedId === post.id ? (
-                      <Check className="w-3.5 h-3.5 text-emerald-600" />
-                    ) : (
-                      <Copy className="w-3.5 h-3.5" />
-                    )}
-                    <span>{copiedId === post.id ? 'Copied!' : 'Copy Caption'}</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    disabled={publishing}
-                    onClick={() => handlePublishNow(post)}
-                    className="editorial-btn px-3.5 py-1.5 rounded-xl bg-[#C8F904] text-[#19154E] text-xs font-bold flex items-center gap-1.5"
-                  >
-                    <Send className="w-3.5 h-3.5" />
-                    <span>Publish / Push Now</span>
-                  </button>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
@@ -1260,7 +1727,6 @@ export default function PlannerCalendar({
       {composerOpen && (
         <div className="fixed inset-0 z-50 bg-[#19154E]/60 backdrop-blur-sm flex items-center justify-center p-3 sm:p-5 overflow-y-auto">
           <div className="editorial-card bg-[#FFF8FC] w-full max-w-6xl max-h-[92vh] overflow-y-auto p-5 sm:p-7 space-y-6">
-            {/* Modal Header */}
             <div className="flex items-start justify-between gap-4 pb-4 border-b-2 border-[#19154E]">
               <div>
                 <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-[#FF7EB6] border border-[#19154E] text-[11px] font-bold">
@@ -1280,9 +1746,9 @@ export default function PlannerCalendar({
             </div>
 
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-              {/* LEFT 7 COLS: FORMAT, MEDIA, PLATFORMS, CAPTION, SCHEDULE */}
+              {/* LEFT 7 COLS */}
               <div className="lg:col-span-7 space-y-5">
-                {/* 1. Content Format Picker */}
+                {/* 1. Content Format */}
                 <div>
                   <label className="block text-xs font-bold uppercase tracking-wider text-neutral-600 mb-2">
                     1. Choose Format (Video, Carousel, Photo, or Thread)
@@ -1311,7 +1777,7 @@ export default function PlannerCalendar({
                   </div>
                 </div>
 
-                {/* 2. Target Platforms Multi-Select */}
+                {/* 2. Target Platforms */}
                 <div>
                   <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
                     <label className="text-xs font-bold uppercase tracking-wider text-neutral-600">
@@ -1385,15 +1851,17 @@ export default function PlannerCalendar({
                   </div>
                 </div>
 
-                {/* 3. Multi-File Media Uploader (Video / Carousel Slides / Hosted URL) */}
+                {/* 3. Supabase Temp Cloud Media Uploader */}
                 {format !== 'text' && (
                   <div className="p-4 rounded-2xl bg-white border-2 border-[#19154E] space-y-3">
-                    <div className="flex items-center justify-between">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
                       <span className="text-xs font-bold uppercase tracking-wider text-[#19154E]">
-                        3. Upload {format === 'carousel' ? 'Carousel Slides' : 'Video or Image'}
+                        3. Upload {format === 'carousel' ? 'Carousel Slides' : 'Video or Image'} (Temp Supabase Bucket)
                       </span>
-                      <span className="text-[11px] font-semibold text-neutral-500">
-                        {mediaItems.length} file(s) attached
+                      <span className="text-[11px] font-bold text-neutral-600">
+                        {uploadingCount > 0
+                          ? `☁️ Uploading ${uploadingCount} file(s) to Supabase...`
+                          : `${mediaItems.length} file(s) staged`}
                       </span>
                     </div>
 
@@ -1408,10 +1876,10 @@ export default function PlannerCalendar({
                     >
                       <Upload className="w-6 h-6 mx-auto text-[#19154E] mb-1.5" />
                       <p className="text-xs font-bold text-[#19154E]">
-                        Click or drag &amp; drop video / image files here (select multiple for a Carousel!)
+                        Click or drag &amp; drop MP4 / MOV / PNG / JPG here (max 50 MB per file)
                       </p>
                       <p className="text-[11px] text-neutral-600 mt-0.5">
-                        Supports MP4, MOV, PNG, JPG, WEBP — previews live on the phone right away →
+                        Uploads straight to your temporary Supabase bucket to generate a live <code className="font-mono-code">https://</code> URL, then auto-deletes after posting!
                       </p>
                       <input
                         ref={fileInputRef}
@@ -1423,13 +1891,12 @@ export default function PlannerCalendar({
                       />
                     </div>
 
-                    {/* Optional Public Hosted URL for Graph / TikTok Direct Pull */}
                     <div className="flex gap-2">
                       <input
                         type="url"
                         value={remoteUrlInput}
                         onChange={(e) => setRemoteUrlInput(e.target.value)}
-                        placeholder="Optional public https:// video or image URL (used by Meta/TikTok cloud auto-publish)"
+                        placeholder="Or paste an existing public https:// video or image URL"
                         className="flex-1 px-3 py-2 rounded-xl bg-[#FFF8FC] border-2 border-[#19154E] text-xs"
                       />
                       <button
@@ -1441,7 +1908,6 @@ export default function PlannerCalendar({
                       </button>
                     </div>
 
-                    {/* Slide Strip / Reorder */}
                     {mediaItems.length > 0 && (
                       <div className="flex gap-2.5 overflow-x-auto pt-1 pb-1">
                         {mediaItems.map((m, idx) => (
@@ -1457,8 +1923,12 @@ export default function PlannerCalendar({
                             ) : (
                               <img src={m.url} alt={m.name} className="w-24 h-24 object-cover" />
                             )}
-                            <div className="absolute top-1 left-1 px-1.5 py-0.2 rounded bg-[#19154E]/85 text-white text-[10px] font-bold">
-                              #{idx + 1}
+                            <div className="absolute top-1 left-1 px-1.5 py-0.2 rounded bg-[#19154E]/90 text-white text-[9px] font-bold">
+                              {m.uploading
+                                ? '⏳...'
+                                : m.storagePath
+                                ? `☁️ #${idx + 1}`
+                                : `#${idx + 1}`}
                             </div>
                             <div className="absolute bottom-1 inset-x-1 flex items-center justify-between gap-0.5">
                               <button
@@ -1475,7 +1945,7 @@ export default function PlannerCalendar({
                                 type="button"
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  removeSlide(m.id);
+                                  removeSlide(m);
                                 }}
                                 className="px-1 rounded bg-[#FF7EB6] text-[10px] font-bold"
                               >
@@ -1499,7 +1969,7 @@ export default function PlannerCalendar({
                   </div>
                 )}
 
-                {/* 4. Master Caption + Smart Per-Platform Adapter */}
+                {/* 4. Master Caption + Smart Adapter */}
                 <div className="p-4 rounded-2xl bg-white border-2 border-[#19154E] space-y-3">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <label className="text-xs font-bold uppercase tracking-wider text-[#19154E]">
@@ -1523,7 +1993,6 @@ export default function PlannerCalendar({
                     className="w-full px-3.5 py-2 rounded-xl bg-[#FFF8FC] border-2 border-[#19154E] text-xs font-semibold"
                   />
 
-                  {/* Caption Tabs: Master vs Per-Platform */}
                   <div className="flex flex-wrap gap-1.5">
                     <button
                       type="button"
@@ -1564,7 +2033,7 @@ export default function PlannerCalendar({
                       rows={4}
                       value={masterCaption}
                       onChange={(e) => setMasterCaption(e.target.value)}
-                      placeholder="Write your hook, story, and CTA once here — then click ✨ Auto-Adapt to tailor length & hashtags for X, YouTube Shorts, LinkedIn, TikTok, and Instagram..."
+                      placeholder="Write your hook, story, and CTA once here — then click ✨ Auto-Adapt to tailor length & hashtags for each selected platform..."
                       className="w-full p-3 rounded-xl bg-[#FFF8FC] border-2 border-[#19154E] text-xs sm:text-sm leading-relaxed"
                     />
                   ) : (
@@ -1607,11 +2076,11 @@ export default function PlannerCalendar({
                   )}
                 </div>
 
-                {/* 5. Date/Time + 1-Click Auto-DM Keyword Flow Linker */}
+                {/* 5. Schedule Time + Auto-Cleanup + Auto-DM Trigger */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div className="p-4 rounded-2xl bg-white border-2 border-[#19154E] space-y-2">
+                  <div className="p-4 rounded-2xl bg-white border-2 border-[#19154E] space-y-2.5">
                     <label className="block text-xs font-bold uppercase tracking-wider text-[#19154E]">
-                      5. Schedule Date &amp; Peak Time
+                      5. Schedule Date, Time &amp; Cleanup
                     </label>
                     <div className="grid grid-cols-2 gap-2">
                       <input
@@ -1627,15 +2096,17 @@ export default function PlannerCalendar({
                         className="px-2.5 py-2 rounded-xl bg-[#FFF8FC] border-2 border-[#19154E] text-xs font-mono-code font-bold"
                       />
                     </div>
-                    <p className="text-[11px] text-neutral-600">
-                      🔥 Peak US window for this day:{' '}
-                      <strong>
-                        {
-                          PEAK_WINDOWS_BY_DOW[new Date(`${scheduledDate}T12:00:00`).getDay()]
-                            ?.label
-                        }
-                      </strong>
-                    </p>
+                    <label className="flex items-start gap-2 pt-1 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={autoCleanup}
+                        onChange={(e) => setAutoCleanup(e.target.checked)}
+                        className="w-4 h-4 mt-0.5 accent-[#19154E]"
+                      />
+                      <span className="text-[11px] font-semibold text-neutral-700 leading-snug">
+                        🧹 Auto-delete temp files from Supabase right after live publish (48h max TTL)
+                      </span>
+                    </label>
                   </div>
 
                   <div className="p-4 rounded-2xl bg-[#F5EEFF] border-2 border-[#19154E] space-y-2">
@@ -1676,7 +2147,7 @@ export default function PlannerCalendar({
                 </div>
               </div>
 
-              {/* RIGHT 5 COLS: LIVE MULTI-PLATFORM MOBILE PHONE PREVIEW */}
+              {/* RIGHT 5 COLS: LIVE PHONE PREVIEW */}
               <div className="lg:col-span-5 flex flex-col items-center">
                 <div className="w-full max-w-xs space-y-3">
                   <div className="flex items-center justify-between">
@@ -1705,10 +2176,8 @@ export default function PlannerCalendar({
                     </div>
                   </div>
 
-                  {/* Tactile Phone Frame */}
                   <div className="rounded-[32px] border-[3px] border-[#19154E] bg-[#19154E] p-2.5 shadow-[6px_6px_0px_#19154E]">
                     <div className="rounded-[24px] bg-white overflow-hidden border border-[#19154E]">
-                      {/* Phone Top Bar */}
                       <div className="px-3.5 py-2.5 bg-[#FFF8FC] border-b border-neutral-200 flex items-center justify-between">
                         <div className="flex items-center gap-2">
                           <div className="w-6 h-6 rounded-full bg-[#FF7EB6] border border-[#19154E] flex items-center justify-center text-[10px] font-bold">
@@ -1728,7 +2197,6 @@ export default function PlannerCalendar({
                         </span>
                       </div>
 
-                      {/* Media Viewport */}
                       {format !== 'text' && (
                         <div className="relative bg-[#120F38] aspect-[4/5] flex items-center justify-center overflow-hidden">
                           {currentSlide ? (
@@ -1752,12 +2220,11 @@ export default function PlannerCalendar({
                             <div className="text-center p-6 text-white/80 space-y-2">
                               <Film className="w-10 h-10 mx-auto text-[#FF7EB6]" />
                               <p className="text-xs font-bold">
-                                Drop a {format === 'carousel' ? 'set of slides' : format} on the left to preview live!
+                                Drop a {format === 'carousel' ? 'set of slides' : format} on the left to stage in Supabase &amp; preview!
                               </p>
                             </div>
                           )}
 
-                          {/* Carousel Navigation Overlay */}
                           {mediaItems.length > 1 && (
                             <>
                               <div className="absolute top-2.5 right-2.5 px-2 py-0.5 rounded-full bg-black/70 text-white text-[10px] font-bold">
@@ -1781,22 +2248,11 @@ export default function PlannerCalendar({
                               >
                                 ›
                               </button>
-                              <div className="absolute bottom-2.5 inset-x-0 flex justify-center gap-1">
-                                {mediaItems.map((m, idx) => (
-                                  <span
-                                    key={m.id}
-                                    className={`w-1.5 h-1.5 rounded-full ${
-                                      idx === previewSlideIdx ? 'bg-[#C8F904]' : 'bg-white/50'
-                                    }`}
-                                  />
-                                ))}
-                              </div>
                             </>
                           )}
                         </div>
                       )}
 
-                      {/* Caption Preview Box */}
                       <div className="p-3.5 bg-white space-y-2">
                         <p className="text-xs text-[#19154E] whitespace-pre-line line-clamp-5 leading-relaxed">
                           <span className="font-bold mr-1.5">@{igHandle || 'your_studio'}</span>
@@ -1810,36 +2266,11 @@ export default function PlannerCalendar({
                       </div>
                     </div>
                   </div>
-
-                  {/* Quick Open Native Uploader Shortcuts */}
-                  <div className="p-3 rounded-2xl bg-white border-2 border-[#19154E] space-y-2">
-                    <div className="text-[11px] font-bold text-[#19154E]">
-                      Quick-Open Web Studio Uploaders:
-                    </div>
-                    <div className="flex flex-wrap gap-1.5">
-                      {selectedPlatforms.map((pid) => {
-                        const meta = PLATFORMS.find((p) => p.id === pid);
-                        if (!meta) return null;
-                        return (
-                          <a
-                            key={pid}
-                            href={meta.composerUrl}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-[#FFF8FC] border border-[#19154E] text-[10px] font-bold hover:bg-[#C8F904]"
-                          >
-                            <span>{meta.short}</span>
-                            <ExternalLink className="w-2.5 h-2.5" />
-                          </a>
-                        );
-                      })}
-                    </div>
-                  </div>
                 </div>
               </div>
             </div>
 
-            {/* Modal Action Footer */}
+            {/* Modal Footer */}
             <div className="pt-4 border-t-2 border-[#19154E] flex flex-wrap items-center justify-between gap-3">
               <button
                 type="button"
@@ -1852,25 +2283,28 @@ export default function PlannerCalendar({
               <div className="flex flex-wrap items-center gap-2.5">
                 <button
                   type="button"
+                  disabled={uploadingCount > 0}
                   onClick={() => handleSaveScheduleOrDraft('scheduled')}
-                  className="editorial-btn px-5 py-2.5 rounded-2xl bg-[#FF7EB6] text-[#19154E] text-xs sm:text-sm font-bold flex items-center gap-2"
+                  className="editorial-btn px-5 py-2.5 rounded-2xl bg-[#FF7EB6] text-[#19154E] text-xs sm:text-sm font-bold flex items-center gap-2 disabled:opacity-60"
                 >
                   <Clock className="w-4 h-4" />
                   <span>
-                    Schedule for {scheduledDate} @ {formatTime12h(scheduledTime)}
+                    {uploadingCount > 0
+                      ? 'Uploading Media...'
+                      : `Schedule for ${scheduledDate} @ ${formatTime12h(scheduledTime)}`}
                   </span>
                 </button>
 
                 <button
                   type="button"
-                  disabled={publishing}
+                  disabled={publishing || uploadingCount > 0}
                   onClick={() => handlePublishNow()}
-                  className="editorial-btn px-5 py-2.5 rounded-2xl bg-[#C8F904] text-[#19154E] text-xs sm:text-sm font-bold flex items-center gap-2"
+                  className="editorial-btn px-5 py-2.5 rounded-2xl bg-[#C8F904] text-[#19154E] text-xs sm:text-sm font-bold flex items-center gap-2 disabled:opacity-60"
                 >
                   <Send className="w-4 h-4" />
                   <span>
                     {publishing
-                      ? 'Dispatching...'
+                      ? 'Publishing...'
                       : `Publish Now to ${selectedPlatforms.length} Platform${
                           selectedPlatforms.length > 1 ? 's' : ''
                         }`}
@@ -1883,7 +2317,56 @@ export default function PlannerCalendar({
       )}
 
       {/* ============================================================
-          PLATFORM API CREDENTIALS MODAL (OPTIONAL LIVE PUSH KEYS)
+          VIEW SUPABASE SQL MODAL
+      ============================================================ */}
+      {showSetupSqlModal && (
+        <div className="fixed inset-0 z-50 bg-[#19154E]/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="editorial-card bg-[#FFF8FC] w-full max-w-2xl max-h-[85vh] overflow-y-auto p-6 space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b-2 border-[#19154E]">
+              <h4 className="font-display text-lg font-bold text-[#19154E]">
+                Supabase Temporary Storage &amp; Scheduler SQL
+              </h4>
+              <button
+                type="button"
+                onClick={() => setShowSetupSqlModal(false)}
+                className="p-1.5 rounded-xl bg-white border-2 border-[#19154E]"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <pre className="p-4 rounded-2xl bg-[#19154E] text-[#FFF8FC] text-[11px] font-mono-code overflow-x-auto max-h-96">
+              {SUPABASE_SETUP_SQL}
+            </pre>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() =>
+                  copyText(
+                    SUPABASE_SETUP_SQL,
+                    'modal-sql',
+                    'Copied SQL! Paste into Supabase SQL Editor & click Run.'
+                  )
+                }
+                className="editorial-btn px-4 py-2 rounded-xl bg-[#C8F904] text-xs font-bold"
+              >
+                {copiedId === 'modal-sql' ? 'Copied!' : 'Copy SQL'}
+              </button>
+              <a
+                href="https://supabase.com/dashboard/project/ttmtmsafqmfjdkbtjglv/sql/new"
+                target="_blank"
+                rel="noreferrer"
+                className="editorial-btn px-4 py-2 rounded-xl bg-[#FF7EB6] text-xs font-bold flex items-center gap-1.5"
+              >
+                <span>Open Supabase SQL Editor</span>
+                <ExternalLink className="w-3.5 h-3.5" />
+              </a>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ============================================================
+          PLATFORM API CREDENTIALS MODAL
       ============================================================ */}
       {showTokensModal && (
         <div className="fixed inset-0 z-50 bg-[#19154E]/60 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto">
@@ -1897,7 +2380,7 @@ export default function PlannerCalendar({
                   🔑 Multi-Platform Live API Connections
                 </h4>
                 <p className="text-xs text-neutral-600">
-                  Optional: connect OAuth tokens for live 1-click API publishing. Any platform left blank automatically uses Safe Queue &amp; Preview Mode!
+                  Saved encrypted in your RLS-isolated Supabase row so scheduled posts can publish automatically!
                 </p>
               </div>
               <button

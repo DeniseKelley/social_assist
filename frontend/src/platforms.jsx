@@ -64,14 +64,23 @@ export const PLATFORMS = [
     contentLabel: 'Page Posts',
     badgeBg: '#7CC4FA',
     badgeText: '#19154E',
-    placeholder: 'https://www.facebook.com/your_page or @your_page',
+    placeholder: 'https://www.facebook.com/your_page or profile.php?id=... or @your_page',
     tokenLabel: 'Optional Facebook Page Graph Access Token',
     tokenPlaceholder: 'EAA...',
-    buildProfileUrl: (h) => `https://www.facebook.com/${encodeURIComponent(h)}`,
+    buildProfileUrl: (h) =>
+      /^https?:\/\//i.test(h)
+        ? h
+        : /^\d{8,}$/.test(h)
+        ? `https://www.facebook.com/profile.php?id=${encodeURIComponent(h)}`
+        : `https://www.facebook.com/${encodeURIComponent(h)}`,
     buildLoginUrl: (h) =>
-      `https://www.facebook.com/login.php?next=${encodeURIComponent(
-        `https://www.facebook.com/${h}`
-      )}`,
+      /^https?:\/\//i.test(h)
+        ? 'https://www.facebook.com/login.php'
+        : `https://www.facebook.com/login.php?next=${encodeURIComponent(
+            /^\d{8,}$/.test(h)
+              ? `https://www.facebook.com/profile.php?id=${h}`
+              : `https://www.facebook.com/${h}`
+          )}`,
   },
   {
     id: 'x',
@@ -135,6 +144,9 @@ const RESERVED_SOCIAL_PATHS = new Set([
   'live',
   'about',
   'share',
+  'profile.php',
+  'people',
+  'pages',
 ]);
 
 const KNOWN_SOCIAL_DOMAINS = [
@@ -159,21 +171,27 @@ function isBareSocialDomain(host) {
   return KNOWN_SOCIAL_DOMAINS.some((d) => h === d || h.endsWith(`.${d}`));
 }
 
-export function isShortTikTokShareUrl(raw) {
+export function isShortSocialShareUrl(raw) {
   const s = String(raw || '').trim();
   if (!s) return false;
   try {
-    const normalized = s.startsWith('http') ? s : `https://${s}`;
+    const normalized = /^https?:\/\//i.test(s) ? s : `https://${s}`;
     const u = new URL(normalized);
     const h = u.hostname.toLowerCase();
     const parts = u.pathname.split('/').filter(Boolean);
     if ((h === 'vm.tiktok.com' || h === 'vt.tiktok.com') && parts.length >= 1) return true;
     if (h.endsWith('tiktok.com') && parts[0]?.toLowerCase() === 't' && parts[1]) return true;
+    if (h === 'fb.me' && parts.length >= 1) return true;
+    if ((h.endsWith('facebook.com') || h.endsWith('fb.com')) && parts[0]?.toLowerCase() === 'share' && parts[1]) {
+      return true;
+    }
   } catch {
     return false;
   }
   return false;
 }
+
+export const isShortTikTokShareUrl = isShortSocialShareUrl;
 
 export function explainInvalidHandleInput(raw, platformName = 'Social') {
   const s = String(raw || '').trim();
@@ -198,15 +216,22 @@ export function extractHandleForPlatform(raw) {
     return '';
   }
 
-  // Allow TikTok short share links (vm.tiktok.com/..., tiktok.com/t/...) through so backend resolves redirect
-  if (isShortTikTokShareUrl(s)) {
-    return s.startsWith('http') ? s : `https://${s}`;
+  // Allow TikTok & Facebook short share links through so backend resolves redirect to real handle/ID
+  if (isShortSocialShareUrl(s)) {
+    return /^https?:\/\//i.test(s) ? s : `https://${s}`;
+  }
+
+  // Support bare "profile.php?id=123456789" pasted without domain
+  if (/^profile\.php\?/i.test(s)) {
+    const idMatch = s.match(/[?&]id=(\d{6,})/);
+    if (idMatch) return idMatch[1];
   }
 
   const looksLikeUrlOrDomain =
     /^https?:\/\//i.test(s) ||
     s.includes('.com') ||
     s.includes('.net') ||
+    s.includes('fb.me') ||
     s.includes('x.com') ||
     s.includes('youtu.be');
 
@@ -214,10 +239,36 @@ export function extractHandleForPlatform(raw) {
     try {
       const normalized = /^https?:\/\//i.test(s) ? s : `https://${s}`;
       const u = new URL(normalized);
+      const hostLower = u.hostname.toLowerCase();
       const parts = u.pathname
         .split('/')
         .map((p) => decodeURIComponent(p).trim())
         .filter(Boolean);
+
+      // Facebook special URL shapes: profile.php?id=..., /people/Name/123..., /p/Name-123..., /pages/.../123...
+      if (hostLower.endsWith('facebook.com') || hostLower.endsWith('fb.com')) {
+        const queryId = u.searchParams.get('id');
+        if (queryId && /^\d{6,}$/.test(queryId.trim())) {
+          return queryId.trim();
+        }
+        if (parts[0]?.toLowerCase() === 'people' && parts.length >= 2) {
+          const numericPart = [...parts].reverse().find((seg) => /^\d{6,}$/.test(seg));
+          if (numericPart) return numericPart;
+        }
+        if (parts[0]?.toLowerCase() === 'p' && parts[1]) {
+          const trailingId = parts[1].match(/-(\d{6,})$/)?.[1];
+          return trailingId || parts[1];
+        }
+        if (parts[0]?.toLowerCase() === 'pages' && parts.length >= 2) {
+          const lastSeg = parts[parts.length - 1];
+          const trailingId = lastSeg.match(/(\d{6,})$/)?.[1];
+          if (trailingId) return trailingId;
+        }
+        if (parts[0]?.toLowerCase() === 'profile.php') {
+          return '';
+        }
+      }
+
       if (isBareSocialDomain(u.hostname)) {
         if (parts.length === 0) {
           return '';
