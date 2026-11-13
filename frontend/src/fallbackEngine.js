@@ -1,9 +1,10 @@
 // Generic empty workspace baseline & local OpenClaw strategy formatter for SocialAssist.
-// Contains ZERO personal accounts, tokens, or private Instagram Insights.
+// Supports Instagram, TikTok, YouTube, Facebook, X, Threads, and All-Platforms mode.
+// Contains ZERO personal accounts, tokens, or private Insights.
 
 export const INITIAL_AUTOMATIONS = [];
 
-const GENERIC_US_BENCHMARK_ACTIVITY = {
+export const GENERIC_US_BENCHMARK_ACTIVITY = {
   us_audience_share_pct: null,
   us_estimated_followers: null,
   primary_us_window_est: '5:30 PM – 8:30 PM EST (2:30 PM – 5:30 PM PST)',
@@ -13,8 +14,8 @@ const GENERIC_US_BENCHMARK_ACTIVITY = {
   gender_split: null,
   us_timezones: [
     { zone: 'Eastern (EST/EDT)', share_pct: 47, peak_local: '6:00 PM – 9:00 PM EST' },
-    { zone: 'Pacific (PST/PDT)', share_pct: 17, peak_local: '5:00 PM – 8:00 PM PST (8–11 PM EST)' },
     { zone: 'Central (CST/CDT)', share_pct: 29, peak_local: '5:30 PM – 8:30 PM CST (6:30–9:30 PM EST)' },
+    { zone: 'Pacific (PST/PDT)', share_pct: 17, peak_local: '5:00 PM – 8:00 PM PST (8–11 PM EST)' },
     { zone: 'Mountain (MST/MDT)', share_pct: 7, peak_local: '5:30 PM – 8:30 PM MST' },
   ],
   us_cities: [
@@ -39,7 +40,7 @@ const GENERIC_US_BENCHMARK_ACTIVITY = {
       day: 'Tuesday',
       window_est: '5:45 PM – 7:30 PM EST',
       us_active_pct: 98,
-      best_for: 'Flagship Educational & Tutorial Reels',
+      best_for: 'Flagship Educational & Tutorial Videos',
     },
     {
       day: 'Thursday',
@@ -51,7 +52,7 @@ const GENERIC_US_BENCHMARK_ACTIVITY = {
       day: 'Wednesday',
       window_est: '6:00 PM – 8:30 PM EST',
       us_active_pct: 94,
-      best_for: 'Comment-to-DM Resource & Lead Magnet Reels',
+      best_for: 'Comment-to-DM Resource & Lead Magnet Posts',
     },
     {
       day: 'Sunday',
@@ -69,13 +70,13 @@ export const EMPTY_WORKSPACE_ANALYTICS = {
   fetched_at: null,
   profile: {
     username: '',
-    name: 'No Instagram Connected Yet',
+    name: 'No Social Account Connected Yet',
     account_type: 'CREATOR',
     followers_count: 0,
     follows_count: 0,
     media_count: 0,
     biography:
-      'Enter your Instagram @handle or profile link in the Connect IG tab to connect your account and pull live stats.',
+      'Connect Instagram, TikTok, YouTube, Facebook, X, or Threads in the Connect Accounts tab to pull live stats.',
     profile_picture_url: '',
     fallback_profile_picture_url: '',
   },
@@ -101,7 +102,7 @@ export const EMPTY_WORKSPACE_ANALYTICS = {
     strategies: [],
     content_ideas: [],
     openclaw_brief:
-      '# Connect an Instagram account in the Connect IG tab to generate a live OpenClaw brief.',
+      '# Connect Instagram, TikTok, YouTube, Facebook, X, or Threads in the Connect Accounts tab to generate a live OpenClaw brief.',
   },
 };
 
@@ -111,8 +112,13 @@ export function runLocalOpenClawAnalysis(prompt, analyticsData = EMPTY_WORKSPACE
   const posts = analyticsData?.posts || [];
   const profile = analyticsData?.profile || {};
   const username = profile.username || '';
+  const platformLabel =
+    analyticsData?.platform === 'all'
+      ? 'All Connected Platforms'
+      : (analyticsData?.platform || 'Social').replace(/^\w/, (c) => c.toUpperCase());
+
   if (!username || posts.length === 0) {
-    return `### 🦞 OpenClaw Live Instagram Agent\nConnect an Instagram account in the **Connect IG** tab first to analyze live Reels, views, likes, and engagement patterns!`;
+    return `### 🦞 OpenClaw Omnichannel Social Agent\nConnect **Instagram, TikTok, YouTube, Facebook, X, or Threads** in the **Connect** tab first to analyze live videos, posts, views, likes, and engagement patterns!`;
   }
 
   const byViews = [...posts].sort((a, b) => (b.views || 0) - (a.views || 0));
@@ -124,29 +130,30 @@ export function runLocalOpenClawAnalysis(prompt, analyticsData = EMPTY_WORKSPACE
   const totalViews = posts.reduce((acc, p) => acc + (p.views || 0), 0);
   const totalLikes = posts.reduce((acc, p) => acc + (p.likes || 0), 0);
   const totalComments = posts.reduce((acc, p) => acc + (p.comments || 0), 0);
+  const handleTitle = analyticsData?.platform === 'all' ? username : `@${username}`;
 
-  return `### 🦞 OpenClaw Live Instagram Analysis for @${username} (${followersCount.toLocaleString()} Live Followers · ${totalViews.toLocaleString()} Tracked Views)
+  return `### 🦞 OpenClaw Live ${platformLabel} Analysis — ${handleTitle} (${followersCount.toLocaleString()} Audience · ${totalViews.toLocaleString()} Tracked Views)
 **Agent Task**: *${prompt}*
 
 ---
 
-#### 1. What @${username}'s Live Posts Reveal (${posts.length} Synced Posts)
-Across **${posts.length} live posts** (**${totalViews.toLocaleString()} views** · **${totalLikes.toLocaleString()} likes** · **${totalComments.toLocaleString()} comments**):
+#### 1. What Your Live Content Reveals (${posts.length} Synced Items)
+Across **${posts.length} live items** (**${totalViews.toLocaleString()} views** · **${totalLikes.toLocaleString()} likes** · **${totalComments.toLocaleString()} comments**):
 
-1. **🥇 #1 Top Performing Post: "${top1.title || 'Post #1'}"** (*${top1.published_label || 'Live'}*)
-   - **Live Metrics**: **\`${(top1.views || 0).toLocaleString()} views\`** · **\`${(top1.likes || 0).toLocaleString()} likes\`** · **\`${(top1.comments || 0).toLocaleString()} comments\`** · **\`${top1.engagement_rate || 0}% ER\`**
+1. **🥇 #1 Top Performing Item: "${top1.title || 'Post #1'}"** (*${top1.platformName || platformLabel} · ${top1.published_label || 'Live'}*)
+   - **Live Metrics**: **\`${(top1.views || 0).toLocaleString()} views\`** · **\`${(top1.likes || 0).toLocaleString()} likes\`** · **\`${top1.engagement_rate || 0}% ER\`**
    - **Link**: ${top1.permalink || ''}
-2. **🥈 #2 Performing Post: "${top2.title || 'Post #2'}"** (*${top2.published_label || 'Live'}*)
-   - **Live Metrics**: **\`${(top2.views || 0).toLocaleString()} views\`** · **\`${(top2.likes || 0).toLocaleString()} likes\`** · **\`${(top2.comments || 0).toLocaleString()} comments\`** · **\`${top2.engagement_rate || 0}% ER\`**
+2. **🥈 #2 Performing Item: "${top2.title || 'Post #2'}"** (*${top2.platformName || platformLabel} · ${top2.published_label || 'Live'}*)
+   - **Live Metrics**: **\`${(top2.views || 0).toLocaleString()} views\`** · **\`${(top2.likes || 0).toLocaleString()} likes\`** · **\`${top2.engagement_rate || 0}% ER\`**
    - **Link**: ${top2.permalink || ''}
-3. **🥉 #3 Performing Post: "${top3.title || 'Post #3'}"** (*${top3.published_label || 'Live'}*)
-   - **Live Metrics**: **\`${(top3.views || 0).toLocaleString()} views\`** · **\`${(top3.likes || 0).toLocaleString()} likes\`** · **\`${(top3.comments || 0).toLocaleString()} comments\`** · **\`${top3.engagement_rate || 0}% ER\`**
+3. **🥉 #3 Performing Item: "${top3.title || 'Post #3'}"** (*${top3.platformName || platformLabel} · ${top3.published_label || 'Live'}*)
+   - **Live Metrics**: **\`${(top3.views || 0).toLocaleString()} views\`** · **\`${(top3.likes || 0).toLocaleString()} likes\`** · **\`${top3.engagement_rate || 0}% ER\`**
    - **Link**: ${top3.permalink || ''}
 
 ---
 
-#### 2. 🎬 3 Next High-Converting Ideas for @${username}
-1. **Direct Part 2 Sequel to "${(top1.title || 'Your #1 Post').slice(0, 56)}"** — Reuse the exact first-3-second hook format and add a 1-word Comment-to-DM trigger (**\`LINK\`**).
-2. **Rapid 30s Breakdown / Checklist Reel** — Answer the #1 question in the comments of ${top1.permalink || 'your top Reel'} and trigger an automated DM guide (**\`GUIDE\`**).
+#### 2. 🎬 3 Next High-Converting Ideas (${platformLabel})
+1. **Direct Part 2 Sequel to "${(top1.title || 'Your #1 Post').slice(0, 56)}"** — Reuse the exact first-3-second hook format and add a 1-word Comment/DM trigger (**\`LINK\`**).
+2. **Cross-Platform Native Adaptation** — Publish the short video cut to Instagram Reels, TikTok, and YouTube Shorts, and post the written summary thread on X, Facebook, and Threads (**\`GUIDE\`**).
 3. **Peak Window Publishing** — Test publishing at **12:15 PM EST** and **6:00 PM EST** to capture simultaneous US East & West Coast scroll windows.`;
 }

@@ -25,7 +25,9 @@ import {
   LogIn,
   UserPlus,
   LogOut,
+  Calendar,
 } from 'lucide-react';
+import PlannerCalendar from './PlannerCalendar';
 import {
   TechFairyCharacter,
   DataAstronomerCharacter,
@@ -35,8 +37,16 @@ import {
   INITIAL_AUTOMATIONS,
   INITIAL_ANALYTICS,
   EMPTY_WORKSPACE_ANALYTICS,
+  GENERIC_US_BENCHMARK_ACTIVITY,
   runLocalOpenClawAnalysis,
 } from './fallbackEngine';
+import {
+  PLATFORMS,
+  PLATFORM_BY_ID,
+  PlatformIcon,
+  extractHandleForPlatform,
+  buildCombinedPlatformAnalytics,
+} from './platforms';
 import {
   supabase,
   SUPABASE_URL,
@@ -49,10 +59,12 @@ import PoliciesModal from './PoliciesModal';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('automations'); // 'automations' | 'analytics' | 'strategy' | 'connect'
-  const [connection, setConnection] = useState(null);
+  const [selectedPlatform, setSelectedPlatform] = useState('all'); // 'all' | 'instagram' | 'tiktok' | 'youtube' | 'facebook' | 'x' | 'threads'
+  const [connectPlatform, setConnectPlatform] = useState('instagram'); // 'instagram' | 'tiktok' | 'youtube' | 'facebook' | 'x' | 'threads'
+  const [connectionsMap, setConnectionsMap] = useState({});
+  const [analyticsByPlatform, setAnalyticsByPlatform] = useState({});
   const [automations, setAutomations] = useState([]);
   const [logs, setLogs] = useState([]);
-  const [analyticsData, setAnalyticsData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [toast, setToast] = useState(null);
@@ -93,6 +105,7 @@ export default function App() {
   const [showNewFlow, setShowNewFlow] = useState(false);
   const [newFlow, setNewFlow] = useState({
     name: '',
+    platform: 'all',
     trigger_type: 'comment_keyword',
     keywords: 'LINK, GUIDE',
     public_comment_reply: 'Just sent it to your DMs! Check your message requests ✨🧚‍♀️',
@@ -113,11 +126,11 @@ export default function App() {
     'http://localhost:18789/v1/chat/completions'
   );
   const [openclawPrompt, setOpenclawPrompt] = useState(
-    'Analyze my top-performing live Reels by Views, Likes, and Engagement Rate, break down the exact patterns in their text summaries, and write 3 new high-converting Reel scripts optimized for my US audience active window.'
+    'Analyze my top-performing live posts & videos across my connected platforms and write 3 new high-converting scripts optimized for peak US scroll windows.'
   );
   const [openclawOutput, setOpenclawOutput] = useState(() =>
     runLocalOpenClawAnalysis(
-      'Analyze my top-performing live Reels by Views, Likes, and Engagement Rate, break down the exact patterns in their text summaries, and write 3 new high-converting Reel scripts optimized for my US audience active window.',
+      'Analyze my top-performing live posts & videos across my connected platforms and write 3 new high-converting scripts optimized for peak US scroll windows.',
       INITIAL_ANALYTICS
     )
   );
@@ -134,6 +147,19 @@ export default function App() {
     setTimeout(() => setIsCastingWand(false), 750);
   };
 
+  const getActiveAnalyticsSnapshot = (overrideMap, overrideConns, overridePlatform) => {
+    const aMap = overrideMap || analyticsByPlatform;
+    const cMap = overrideConns || connectionsMap;
+    const plat = overridePlatform || selectedPlatform;
+    if (plat === 'all') {
+      return (
+        buildCombinedPlatformAnalytics(aMap, cMap, GENERIC_US_BENCHMARK_ACTIVITY) ||
+        EMPTY_WORKSPACE_ANALYTICS
+      );
+    }
+    return aMap[plat] || EMPTY_WORKSPACE_ANALYTICS;
+  };
+
   const handleRunOpenClaw = async (customPromptText) => {
     const promptToUse = customPromptText || openclawPrompt;
     if (customPromptText) {
@@ -141,6 +167,7 @@ export default function App() {
     }
     setOpenclawStatus('running');
     triggerFairyWand();
+    const activeSnapshot = getActiveAnalyticsSnapshot();
     try {
       const res = await fetch('/api/openclaw/analyze', {
         method: 'POST',
@@ -148,6 +175,11 @@ export default function App() {
         body: JSON.stringify({
           prompt: promptToUse,
           gateway_url: openclawGatewayUrl,
+          platform: selectedPlatform === 'all' ? undefined : selectedPlatform,
+          handle:
+            selectedPlatform !== 'all'
+              ? connectionsMap[selectedPlatform]?.handle
+              : undefined,
         }),
       });
       if (res.ok) {
@@ -156,41 +188,96 @@ export default function App() {
         setOpenclawStatus(
           data.status === 'connected_openclaw_gateway' ? 'connected_gateway' : 'builtin_agent'
         );
-        showToast('OpenClaw Agent finished analyzing your live video stats!');
+        showToast('OpenClaw Agent finished analyzing your live stats!');
         return;
       }
       throw new Error('Fallback to local OpenClaw analyzer');
     } catch {
-      const fallbackText = runLocalOpenClawAnalysis(promptToUse, analyticsData || INITIAL_ANALYTICS);
+      const fallbackText = runLocalOpenClawAnalysis(promptToUse, activeSnapshot);
       setOpenclawOutput(fallbackText);
       setOpenclawStatus('builtin_agent');
-      showToast('OpenClaw Agent finished analyzing your live video stats!');
+      showToast('OpenClaw Agent finished analyzing your live stats!');
     }
   };
 
   const getWorkspaceScope = (emailOverride) => {
-    const raw = (emailOverride ?? currentUserEmail ?? sessionStorage.getItem('sa_user_email') ?? '').trim().toLowerCase();
+    const raw = (
+      emailOverride ??
+      currentUserEmail ??
+      sessionStorage.getItem('sa_user_email') ??
+      ''
+    )
+      .trim()
+      .toLowerCase();
     return raw || 'guest';
   };
 
   const scopedKey = (base, emailOverride) => `${base}_v2:${getWorkspaceScope(emailOverride)}`;
 
-  const fetchLiveInstagramAnalytics = async ({
-    forceRefresh = false,
-    overrideHandle = '',
-    emailOverride,
-  } = {}) => {
-    const connStr = localStorage.getItem(scopedKey('sa_connection', emailOverride)) || 'null';
-    const savedConn = JSON.parse(connStr);
-    const savedToken = localStorage.getItem(scopedKey('sa_ig_access_token', emailOverride)) || '';
-    const targetHandle = (overrideHandle || savedConn?.instagram_handle || '')
-      .replace(/^@/, '')
-      .trim();
+  const loadSavedConnectionsMap = (emailOverride) => {
+    let map = {};
+    try {
+      map = JSON.parse(localStorage.getItem(scopedKey('sa_connections_map', emailOverride)) || '{}') || {};
+    } catch {
+      map = {};
+    }
+    // Seamless migration from single-platform `sa_connection` if present for this user
+    if (!map.instagram) {
+      try {
+        const legacyIg = JSON.parse(
+          localStorage.getItem(scopedKey('sa_connection', emailOverride)) || 'null'
+        );
+        if (legacyIg?.instagram_handle) {
+          const cleanIg = extractHandleForPlatform(legacyIg.instagram_handle);
+          if (cleanIg) {
+            map.instagram = {
+              handle: cleanIg,
+              has_access_token: Boolean(legacyIg.has_access_token),
+              connected_at: new Date().toISOString(),
+            };
+            localStorage.setItem(
+              scopedKey('sa_connections_map', emailOverride),
+              JSON.stringify(map)
+            );
+          }
+        }
+      } catch {
+        // ignore
+      }
+    }
+    return map;
+  };
 
-    if (!targetHandle) {
-      setAnalyticsData(EMPTY_WORKSPACE_ANALYTICS);
-      setOpenclawOutput(runLocalOpenClawAnalysis(openclawPrompt, EMPTY_WORKSPACE_ANALYTICS));
-      return EMPTY_WORKSPACE_ANALYTICS;
+  const loadSavedTokensMap = (emailOverride) => {
+    let tMap = {};
+    try {
+      tMap = JSON.parse(localStorage.getItem(scopedKey('sa_tokens_map', emailOverride)) || '{}') || {};
+    } catch {
+      tMap = {};
+    }
+    const legacyIgToken = localStorage.getItem(scopedKey('sa_ig_access_token', emailOverride)) || '';
+    if (legacyIgToken && !tMap.instagram) {
+      tMap.instagram = legacyIgToken;
+      localStorage.setItem(scopedKey('sa_tokens_map', emailOverride), JSON.stringify(tMap));
+    }
+    return tMap;
+  };
+
+  const fetchPlatformAnalytics = async ({
+    platformId,
+    overrideHandle = '',
+    forceRefresh = false,
+    emailOverride,
+  }) => {
+    const cMap = loadSavedConnectionsMap(emailOverride);
+    const tMap = loadSavedTokensMap(emailOverride);
+    const targetHandle = extractHandleForPlatform(
+      overrideHandle || cMap[platformId]?.handle || ''
+    );
+    const savedToken = tMap[platformId] || '';
+
+    if (!targetHandle && !savedToken) {
+      return null;
     }
 
     const headers = {};
@@ -198,24 +285,35 @@ export default function App() {
       headers.Authorization = `Bearer ${savedToken}`;
     }
 
-    const qs = new URLSearchParams({ handle: targetHandle });
+    const qs = new URLSearchParams({
+      platform: platformId,
+      handle: targetHandle,
+    });
     if (forceRefresh) {
       qs.set('refresh', 'true');
     }
 
-    const anaResp = await fetch(`/api/analytics?${qs.toString()}`, {
+    const resp = await fetch(`/api/analytics?${qs.toString()}`, {
       headers,
       cache: forceRefresh ? 'no-store' : 'default',
     });
-    if (!anaResp.ok) {
-      throw new Error(`Analytics endpoint returned HTTP ${anaResp.status}`);
+    if (!resp.ok) {
+      const errJson = await resp.json().catch(() => ({}));
+      throw new Error(
+        errJson.error || `${PLATFORM_BY_ID[platformId]?.name || platformId} returned HTTP ${resp.status}`
+      );
     }
-    const anaRes = await anaResp.json();
-    setAnalyticsData(anaRes);
-    setOpenclawOutput((prev) =>
-      openclawStatus === 'ready' ? runLocalOpenClawAnalysis(openclawPrompt, anaRes) : prev
-    );
-    return anaRes;
+    const data = await resp.json();
+    setAnalyticsByPlatform((prev) => {
+      const next = { ...prev, [platformId]: data };
+      setOpenclawOutput((prevOut) => {
+        if (openclawStatus !== 'ready') return prevOut;
+        const snap = getActiveAnalyticsSnapshot(next, cMap);
+        return runLocalOpenClawAnalysis(openclawPrompt, snap);
+      });
+      return next;
+    });
+    return data;
   };
 
   const fetchAll = async (emailOverride) => {
@@ -226,42 +324,60 @@ export default function App() {
     localStorage.removeItem('sa_connection');
     localStorage.removeItem('sa_ig_access_token');
 
-    const rawConn = localStorage.getItem(scopedKey('sa_connection', emailOverride));
-    const savedToken = localStorage.getItem(scopedKey('sa_ig_access_token', emailOverride)) || '';
-    const savedConn = JSON.parse(rawConn || 'null') || {
-      instagram_handle: '',
-      has_access_token: Boolean(savedToken),
-      webhook_verify_token: 'social_assist_verify_token',
-    };
-
-    const resolvedHandle = (savedConn.instagram_handle || '').replace(/^@/, '').trim();
+    const cMap = loadSavedConnectionsMap(emailOverride);
     const rawFlows = localStorage.getItem(scopedKey('sa_automations', emailOverride));
     const savedFlows = JSON.parse(rawFlows || 'null') || INITIAL_AUTOMATIONS;
     const savedLogs = JSON.parse(
       localStorage.getItem(scopedKey('sa_logs', emailOverride)) || '[]'
     );
 
-    setConnection(savedConn);
-    setHandleInput(resolvedHandle ? `https://www.instagram.com/${resolvedHandle}/` : '');
+    setConnectionsMap(cMap);
     setAutomations(savedFlows);
     setLogs(savedLogs);
 
-    if (!resolvedHandle) {
+    const connectedPlatformIds = PLATFORMS.map((p) => p.id).filter((pid) => cMap[pid]?.handle);
+    const initialConnectPlat = connectedPlatformIds[0] || 'instagram';
+    setConnectPlatform(initialConnectPlat);
+    const initHandle = cMap[initialConnectPlat]?.handle || '';
+    setHandleInput(
+      initHandle ? PLATFORM_BY_ID[initialConnectPlat].buildProfileUrl(initHandle) : ''
+    );
+
+    if (connectedPlatformIds.length === 0) {
+      setSelectedPlatform('instagram');
       setActiveTab('connect');
-      setAnalyticsData(EMPTY_WORKSPACE_ANALYTICS);
+      setAnalyticsByPlatform({});
       setOpenclawOutput(runLocalOpenClawAnalysis(openclawPrompt, EMPTY_WORKSPACE_ANALYTICS));
       setLoading(false);
       return;
     }
 
+    setSelectedPlatform(connectedPlatformIds.length > 1 ? 'all' : connectedPlatformIds[0]);
+
     try {
-      await fetchLiveInstagramAnalytics({
-        forceRefresh: false,
-        overrideHandle: resolvedHandle,
-        emailOverride,
-      });
-    } catch {
-      setAnalyticsData((prev) => prev || EMPTY_WORKSPACE_ANALYTICS);
+      const results = await Promise.all(
+        connectedPlatformIds.map(async (pid) => {
+          try {
+            const res = await fetchPlatformAnalytics({
+              platformId: pid,
+              overrideHandle: cMap[pid].handle,
+              forceRefresh: false,
+              emailOverride,
+            });
+            return [pid, res];
+          } catch {
+            return [pid, null];
+          }
+        })
+      );
+      const nextAnalytics = {};
+      for (const [pid, res] of results) {
+        if (res) nextAnalytics[pid] = res;
+      }
+      setAnalyticsByPlatform(nextAnalytics);
+      const nextSelected = connectedPlatformIds.length > 1 ? 'all' : connectedPlatformIds[0];
+      const snap = getActiveAnalyticsSnapshot(nextAnalytics, cMap, nextSelected);
+      setOpenclawOutput(runLocalOpenClawAnalysis(openclawPrompt, snap));
     } finally {
       setLoading(false);
     }
@@ -321,13 +437,21 @@ export default function App() {
       setAuthChecking(false);
     }, 4000);
 
-    // Auto-refresh live Instagram numbers every 90 seconds while authenticated & visible
+    // Auto-refresh live platform numbers every 90 seconds while authenticated & visible
     const livePollTimer = setInterval(() => {
       const activeEmail = sessionStorage.getItem('sa_user_email') || '';
       if (document.visibilityState === 'visible' && activeEmail) {
-        fetchLiveInstagramAnalytics({ forceRefresh: true, emailOverride: activeEmail }).catch(
-          () => {}
-        );
+        const savedMap = loadSavedConnectionsMap(activeEmail);
+        for (const p of PLATFORMS) {
+          if (savedMap[p.id]?.handle) {
+            fetchPlatformAnalytics({
+              platformId: p.id,
+              overrideHandle: savedMap[p.id].handle,
+              forceRefresh: true,
+              emailOverride: activeEmail,
+            }).catch(() => {});
+          }
+        }
       }
     }, 90000);
 
@@ -465,55 +589,54 @@ export default function App() {
     };
   }, []);
 
-  const extractHandleFromLink = (raw) => {
-    const s = (raw || '').trim();
-    if (!s) return '';
-    if (s.includes('instagram.com/')) {
-      const after = s.split('instagram.com/')[1].split('?')[0].replace(/^\/+|\/+$/g, '');
-      const seg = after.split('/')[0].replace(/^@/, '');
-      if (seg && !['p', 'reel', 'reels', 'stories', 'explore', 'accounts'].includes(seg)) {
-        return seg;
-      }
-    }
-    return s.replace(/^@/, '').replace(/^\/+|\/+$/g, '');
+  const handleSelectConnectPlatform = (platId) => {
+    const meta = PLATFORM_BY_ID[platId] || PLATFORM_BY_ID.instagram;
+    setConnectPlatform(meta.id);
+    setConnectStatusMsg(null);
+    setTokenInput('');
+    const existingHandle = connectionsMap[meta.id]?.handle || '';
+    setHandleInput(existingHandle ? meta.buildProfileUrl(existingHandle) : '');
   };
 
   const handleConnectAndRedirect = async (e) => {
     if (e) e.preventDefault();
-    const extracted = extractHandleFromLink(handleInput);
+    const meta = PLATFORM_BY_ID[connectPlatform] || PLATFORM_BY_ID.instagram;
+    const extracted = extractHandleForPlatform(handleInput);
     if (!extracted) {
       setConnectStatusMsg({
         type: 'error',
-        text: 'Please enter your Instagram @handle or profile link first.',
+        text: `Please enter your ${meta.name} @handle or profile link first.`,
       });
-      showToast('Enter your Instagram @handle or profile link first!', 'error');
+      showToast(`Enter your ${meta.name} @handle or profile link first!`, 'error');
       return;
     }
-    // Open Instagram login / profile authorization window immediately on the user's click gesture
-    const targetUrl =
-      connection?.oauth_login_url ||
-      `https://www.instagram.com/accounts/login/?next=%2F${encodeURIComponent(extracted)}%2F`;
-    window.open(targetUrl, 'ig_login_window', 'width=620,height=720');
+    // Open the platform's sign-in / authorization window immediately on the user's click gesture
+    const targetUrl = meta.buildLoginUrl(extracted);
+    window.open(targetUrl, `${meta.id}_login_window`, 'width=620,height=720');
     await handleConnectSubmit(null, extracted);
   };
 
   const handleConnectSubmit = async (e, overrideHandle) => {
     if (e) e.preventDefault();
-    const cleanHandle = overrideHandle || extractHandleFromLink(handleInput);
+    const meta = PLATFORM_BY_ID[connectPlatform] || PLATFORM_BY_ID.instagram;
+    const cleanHandle = overrideHandle || extractHandleForPlatform(handleInput);
     if (!cleanHandle && !(tokenInput && tokenInput.trim())) {
       setConnectStatusMsg({
         type: 'error',
-        text: 'Please enter an Instagram @handle, profile URL, or Graph API token.',
+        text: `Please enter a ${meta.name} @handle, profile URL, or API token.`,
       });
       return;
     }
     setSyncing(true);
     setConnectStatusMsg(null);
     try {
+      const cMap = loadSavedConnectionsMap();
+      const tMap = loadSavedTokensMap();
+
       if (tokenInput && tokenInput.trim()) {
         const cleanToken = tokenInput.trim();
         const verifyResp = await fetch(
-          `/api/analytics?handle=${encodeURIComponent(cleanHandle || 'me')}&refresh=true&strict_token=true`,
+          `/api/analytics?platform=${encodeURIComponent(meta.id)}&handle=${encodeURIComponent(cleanHandle || 'me')}&refresh=true&strict_token=true`,
           {
             headers: { Authorization: `Bearer ${cleanToken}` },
             cache: 'no-store',
@@ -521,45 +644,89 @@ export default function App() {
         );
         if (!verifyResp.ok) {
           const errJson = await verifyResp.json().catch(() => ({}));
-          throw new Error(errJson.error || 'Invalid Instagram Graph API token');
+          throw new Error(errJson.error || `Invalid ${meta.name} API token`);
         }
         const liveAna = await verifyResp.json();
         const finalHandle = liveAna.profile?.username || cleanHandle;
-        localStorage.setItem(scopedKey('sa_ig_access_token'), cleanToken);
-        const updatedConn = {
-          instagram_handle: finalHandle,
-          has_access_token: true,
-          account_id: liveAna.profile?.account_id || '',
-          webhook_verify_token: 'social_assist_verify_token',
+
+        const nextTokens = { ...tMap, [meta.id]: cleanToken };
+        localStorage.setItem(scopedKey('sa_tokens_map'), JSON.stringify(nextTokens));
+        if (meta.id === 'instagram') {
+          localStorage.setItem(scopedKey('sa_ig_access_token'), cleanToken);
+        }
+
+        const nextConns = {
+          ...cMap,
+          [meta.id]: {
+            handle: finalHandle,
+            has_access_token: true,
+            account_id: liveAna.profile?.account_id || '',
+            connected_at: new Date().toISOString(),
+          },
         };
-        localStorage.setItem(scopedKey('sa_connection'), JSON.stringify(updatedConn));
-        setConnection(updatedConn);
-        setHandleInput(`https://www.instagram.com/${finalHandle}/`);
-        setAnalyticsData(liveAna);
-        setOpenclawOutput(runLocalOpenClawAnalysis(openclawPrompt, liveAna));
+        localStorage.setItem(scopedKey('sa_connections_map'), JSON.stringify(nextConns));
+        if (meta.id === 'instagram') {
+          localStorage.setItem(
+            scopedKey('sa_connection'),
+            JSON.stringify({
+              instagram_handle: finalHandle,
+              has_access_token: true,
+              account_id: liveAna.profile?.account_id || '',
+            })
+          );
+        }
+
+        setConnectionsMap(nextConns);
+        setHandleInput(meta.buildProfileUrl(finalHandle));
+        setAnalyticsByPlatform((prev) => {
+          const next = { ...prev, [meta.id]: liveAna };
+          const snap = getActiveAnalyticsSnapshot(next, nextConns, meta.id);
+          setOpenclawOutput(runLocalOpenClawAnalysis(openclawPrompt, snap));
+          return next;
+        });
+        setSelectedPlatform(meta.id);
         setConnectStatusMsg({
           type: 'success',
-          text: `Connected @${finalHandle} via Official Instagram Graph API (live metrics synced)!`,
+          text: `Connected @${finalHandle} on ${meta.name} via Official API (live metrics synced)!`,
         });
-        showToast(`Connected @${finalHandle} via Graph API!`);
+        showToast(`Connected @${finalHandle} on ${meta.name}!`);
         setTokenInput('');
         setActiveTab('analytics');
         triggerFairyWand();
       } else {
-        const updatedConn = {
-          instagram_handle: cleanHandle,
-          has_access_token: Boolean(localStorage.getItem(scopedKey('sa_ig_access_token'))),
-          webhook_verify_token: 'social_assist_verify_token',
+        const nextConns = {
+          ...cMap,
+          [meta.id]: {
+            handle: cleanHandle,
+            has_access_token: Boolean(tMap[meta.id]),
+            connected_at: new Date().toISOString(),
+          },
         };
-        localStorage.setItem(scopedKey('sa_connection'), JSON.stringify(updatedConn));
-        setConnection(updatedConn);
-        setHandleInput(`https://www.instagram.com/${cleanHandle}/`);
-        await fetchLiveInstagramAnalytics({ forceRefresh: true, overrideHandle: cleanHandle });
+        localStorage.setItem(scopedKey('sa_connections_map'), JSON.stringify(nextConns));
+        if (meta.id === 'instagram') {
+          localStorage.setItem(
+            scopedKey('sa_connection'),
+            JSON.stringify({
+              instagram_handle: cleanHandle,
+              has_access_token: Boolean(tMap.instagram),
+            })
+          );
+        }
+        setConnectionsMap(nextConns);
+        setHandleInput(meta.buildProfileUrl(cleanHandle));
+
+        const liveAna = await fetchPlatformAnalytics({
+          platformId: meta.id,
+          overrideHandle: cleanHandle,
+          forceRefresh: true,
+        });
+        setSelectedPlatform(meta.id);
+        setOpenclawOutput(runLocalOpenClawAnalysis(openclawPrompt, liveAna || EMPTY_WORKSPACE_ANALYTICS));
         setConnectStatusMsg({
           type: 'success',
-          text: `Redirected to Instagram & synced live stats for @${cleanHandle}!`,
+          text: `Redirected to ${meta.name} & synced live stats for @${cleanHandle}!`,
         });
-        showToast(`Connected & pulled live stats for @${cleanHandle}!`);
+        showToast(`Connected ${meta.name} & pulled live stats for @${cleanHandle}!`);
         setActiveTab('analytics');
         triggerFairyWand();
       }
@@ -571,19 +738,39 @@ export default function App() {
     }
   };
 
-  const handleDisconnectInstagram = () => {
-    localStorage.removeItem(scopedKey('sa_connection'));
-    localStorage.removeItem(scopedKey('sa_ig_access_token'));
-    setConnection({ instagram_handle: '', has_access_token: false });
-    setHandleInput('');
-    setTokenInput('');
-    setAnalyticsData(EMPTY_WORKSPACE_ANALYTICS);
-    setOpenclawOutput(runLocalOpenClawAnalysis(openclawPrompt, EMPTY_WORKSPACE_ANALYTICS));
+  const handleDisconnectPlatform = (platId = connectPlatform) => {
+    const meta = PLATFORM_BY_ID[platId] || PLATFORM_BY_ID.instagram;
+    const cMap = loadSavedConnectionsMap();
+    const tMap = loadSavedTokensMap();
+    delete cMap[meta.id];
+    delete tMap[meta.id];
+    localStorage.setItem(scopedKey('sa_connections_map'), JSON.stringify(cMap));
+    localStorage.setItem(scopedKey('sa_tokens_map'), JSON.stringify(tMap));
+    if (meta.id === 'instagram') {
+      localStorage.removeItem(scopedKey('sa_connection'));
+      localStorage.removeItem(scopedKey('sa_ig_access_token'));
+    }
+    setConnectionsMap({ ...cMap });
+    if (connectPlatform === meta.id) {
+      setHandleInput('');
+      setTokenInput('');
+    }
+    setAnalyticsByPlatform((prev) => {
+      const next = { ...prev };
+      delete next[meta.id];
+      const remainingIds = PLATFORMS.map((p) => p.id).filter((id) => cMap[id]?.handle);
+      const nextSelected =
+        remainingIds.length > 1 ? 'all' : remainingIds[0] || 'instagram';
+      setSelectedPlatform(nextSelected);
+      const snap = getActiveAnalyticsSnapshot(next, cMap, nextSelected);
+      setOpenclawOutput(runLocalOpenClawAnalysis(openclawPrompt, snap));
+      return next;
+    });
     setConnectStatusMsg({
       type: 'success',
-      text: 'Disconnected Instagram account from your workspace.',
+      text: `Disconnected ${meta.name} account from your workspace.`,
     });
-    showToast('Instagram account disconnected');
+    showToast(`${meta.name} account disconnected`);
   };
 
   const handleCreateFlow = async (e) => {
@@ -595,6 +782,7 @@ export default function App() {
     const created = {
       id: `flow-${Date.now()}`,
       ...newFlow,
+      platform: newFlow.platform || 'all',
       keywords: keywordsList,
       active: true,
       stats: { triggered: 0, dms_sent: 0, link_clicks: 0 },
@@ -605,6 +793,31 @@ export default function App() {
     showToast(`Created automation "${newFlow.name}"!`);
     setShowNewFlow(false);
     triggerFairyWand();
+  };
+
+  const handleCreatePlannerAutoDmFlow = ({ name, keyword, url, platform }) => {
+    const kw = (keyword || '').trim().toUpperCase();
+    if (!kw) return;
+    const alreadyExists = automations.some(
+      (f) => f.trigger_type === 'comment_keyword' && (f.keywords || []).includes(kw)
+    );
+    if (alreadyExists) return;
+    const created = {
+      id: `flow-${Date.now()}`,
+      name: name || `Planner Auto-DM (${kw})`,
+      platform: platform || 'all',
+      trigger_type: 'comment_keyword',
+      keywords: [kw],
+      public_comment_reply: 'Just sent it to your DMs! Check your message requests ✨🧚‍♀️',
+      dm_message: `Hey! 👋 Thanks for commenting "${kw}"! Tap below to open the link:`,
+      dm_button_text: 'Open Link ✨',
+      dm_button_url: url || 'https://example.com',
+      active: true,
+      stats: { triggered: 0, dms_sent: 0, link_clicks: 0 },
+    };
+    const next = [created, ...automations];
+    setAutomations(next);
+    localStorage.setItem(scopedKey('sa_automations'), JSON.stringify(next));
   };
 
   const handleToggleFlow = async (id) => {
@@ -635,6 +848,10 @@ export default function App() {
     let matchedKeyword = '';
     for (const flow of automations) {
       if (!flow.active || flow.trigger_type !== expectedTrigger) continue;
+      const flowPlat = flow.platform || 'all';
+      if (selectedPlatform !== 'all' && flowPlat !== 'all' && flowPlat !== selectedPlatform) {
+        continue;
+      }
       for (const kw of flow.keywords || []) {
         if (textUpper.includes(kw.toUpperCase())) {
           matchedFlow = flow;
@@ -653,6 +870,7 @@ export default function App() {
     }
     const logEntry = {
       id: `log-${Date.now()}`,
+      platform: selectedPlatform === 'all' ? matchedFlow.platform || 'all' : selectedPlatform,
       event_type: simType,
       sender_username: simUser.replace(/^@/, ''),
       incoming_text: simText,
@@ -672,21 +890,60 @@ export default function App() {
   const handleRefreshAnalytics = async () => {
     setSyncing(true);
     try {
-      const fresh = await fetchLiveInstagramAnalytics({ forceRefresh: true });
-      triggerFairyWand();
-      const liveFollowers = (fresh?.profile?.followers_count || 0).toLocaleString();
-      showToast(`Live Instagram sync complete! (${liveFollowers} followers)`);
+      const cMap = loadSavedConnectionsMap();
+      if (selectedPlatform === 'all') {
+        const connectedIds = PLATFORMS.map((p) => p.id).filter((id) => cMap[id]?.handle);
+        if (connectedIds.length === 0) {
+          showToast('Connect at least one social platform first!', 'error');
+          setActiveTab('connect');
+          return;
+        }
+        await Promise.all(
+          connectedIds.map((pid) =>
+            fetchPlatformAnalytics({
+              platformId: pid,
+              overrideHandle: cMap[pid].handle,
+              forceRefresh: true,
+            })
+          )
+        );
+        triggerFairyWand();
+        showToast(`Synced live metrics across ${connectedIds.length} connected platform(s)!`);
+      } else {
+        const meta = PLATFORM_BY_ID[selectedPlatform] || PLATFORM_BY_ID.instagram;
+        if (!cMap[meta.id]?.handle) {
+          setConnectPlatform(meta.id);
+          setActiveTab('connect');
+          showToast(`Connect your ${meta.name} account first!`, 'error');
+          return;
+        }
+        const fresh = await fetchPlatformAnalytics({
+          platformId: meta.id,
+          overrideHandle: cMap[meta.id].handle,
+          forceRefresh: true,
+        });
+        triggerFairyWand();
+        const liveFollowers = (fresh?.profile?.followers_count || 0).toLocaleString();
+        showToast(
+          `Live ${meta.name} sync complete! (${liveFollowers} ${meta.audienceLabel.toLowerCase()})`
+        );
+      }
     } catch {
-      showToast('Could not reach live Instagram endpoint — showing last known snapshot.', 'error');
+      showToast('Could not reach live endpoint — showing last known snapshot.', 'error');
     } finally {
       setSyncing(false);
     }
   };
 
   const handleApplyStrategyKeyword = (keyword, title) => {
-    const activeHandle = analyticsData?.profile?.username || connection?.instagram_handle || 'creator';
+    const snap = getActiveAnalyticsSnapshot();
+    const activeHandle =
+      snap?.profile?.username ||
+      (selectedPlatform !== 'all' ? connectionsMap[selectedPlatform]?.handle : '') ||
+      'creator';
     setNewFlow({
       name: `${title.slice(0, 36)}...`,
+      platform: selectedPlatform === 'all' ? 'all' : selectedPlatform,
       trigger_type: keyword === '🔥' ? 'story_reply' : 'comment_keyword',
       keywords: keyword,
       public_comment_reply:
@@ -695,7 +952,7 @@ export default function App() {
           : `Sent it straight to your DMs! Check your message requests ✨🧚‍♀️`,
       dm_message: `Hey! 👋 Thanks for engaging with @${activeHandle}! Here is the ${keyword} resource from my post:`,
       dm_button_text: `Get ${keyword} Resource ✨`,
-      dm_button_url: 'https://techfairylab.com',
+      dm_button_url: 'https://example.com',
     });
     setActiveTab('automations');
     setShowNewFlow(true);
@@ -1031,6 +1288,10 @@ export default function App() {
     sessionStorage.removeItem('sa_user_email');
     setCurrentUserEmail('');
     setCurrentUsername('');
+    setConnectionsMap({});
+    setAnalyticsByPlatform({});
+    setHandleInput('');
+    setTokenInput('');
     await supabase.auth.signOut().catch(() => {});
     signingOutGuardRef.current = false;
     setIsAuthenticated(false);
@@ -1525,6 +1786,21 @@ export default function App() {
   }
 
   const baseFallback = EMPTY_WORKSPACE_ANALYTICS;
+  const analyticsData = getActiveAnalyticsSnapshot();
+  const connection = connectionsMap?.instagram || null;
+  const connectedPlatformIds = PLATFORMS.map((p) => p.id).filter(
+    (id) => connectionsMap[id]?.handle
+  );
+  const activePlatformMeta =
+    selectedPlatform === 'all' ? null : PLATFORM_BY_ID[selectedPlatform] || PLATFORM_BY_ID.instagram;
+  const connectMeta = PLATFORM_BY_ID[connectPlatform] || PLATFORM_BY_ID.instagram;
+  const activePlatformLabel =
+    selectedPlatform === 'all' ? 'All Connected Platforms' : activePlatformMeta.name;
+  const activeAudienceLabel =
+    selectedPlatform === 'all' ? 'Followers / Subscribers' : activePlatformMeta.audienceLabel;
+  const activeContentLabel =
+    selectedPlatform === 'all' ? 'Posts & Videos' : activePlatformMeta.contentLabel;
+
   const isUnconnected = analyticsData?.source === 'unconnected_workspace';
   const profile = analyticsData?.profile || baseFallback.profile;
   const summary = {
@@ -1553,8 +1829,12 @@ export default function App() {
         : views > 0
         ? Number((((likes + comments + (saves || 0) + (shares || 0)) / views) * 100).toFixed(2))
         : 0;
+    const postPlatId = p.platform || (selectedPlatform === 'all' ? 'instagram' : selectedPlatform);
+    const postPlatMeta = PLATFORM_BY_ID[postPlatId] || PLATFORM_BY_ID.instagram;
     return {
       ...p,
+      platform: postPlatId,
+      platformName: p.platformName || postPlatMeta.name,
       views,
       likes,
       comments,
@@ -1566,8 +1846,8 @@ export default function App() {
           ? Number(((followersGained / views) * 100).toFixed(2))
           : null,
       engagement_rate: engagementRate,
-      title: p.title || (p.caption || '').split('\n')[0].slice(0, 68) || 'Instagram Reel',
-      published_label: p.published_label || 'Reel',
+      title: p.title || (p.caption || '').split('\n')[0].slice(0, 68) || `${postPlatMeta.name} Post`,
+      published_label: p.published_label || postPlatMeta.shortName,
       thumbnail_url: p.thumbnail_url || '',
       fallback_thumbnail_url: p.fallback_thumbnail_url || '',
       video_summary_text:
@@ -1593,11 +1873,10 @@ export default function App() {
   const avgLikesPerPost =
     posts.length > 0 ? Math.round((summary.total_likes || 0) / posts.length) : 0;
 
-  const isLiveSynced =
-    analyticsData?.source === 'live_instagram_public' ||
-    analyticsData?.source === 'live_instagram_sync' ||
-    analyticsData?.source === 'instagram_graph_api';
-  const isGraphApiLive = analyticsData?.source === 'instagram_graph_api';
+  const isLiveSynced = Boolean(
+    analyticsData?.source && analyticsData.source !== 'unconnected_workspace'
+  );
+  const isGraphApiLive = Boolean(analyticsData?.source?.includes('_api'));
   const syncedTimeLabel = analyticsData?.fetched_at
     ? new Date(analyticsData.fetched_at).toLocaleTimeString([], {
         hour: 'numeric',
@@ -1610,6 +1889,11 @@ export default function App() {
     analyticsData?.analysis?.us_audience_activity || INITIAL_ANALYTICS.analysis.us_audience_activity;
   const openclawBrief =
     analyticsData?.analysis?.openclaw_brief || INITIAL_ANALYTICS.analysis.openclaw_brief;
+
+  const visibleAutomations = automations.filter((f) => {
+    const fp = f.platform || 'all';
+    return selectedPlatform === 'all' || fp === 'all' || fp === selectedPlatform;
+  });
 
   return (
     <div className="min-h-screen bg-[#FFF8FC] text-[#19154E] flex flex-col">
@@ -1631,8 +1915,11 @@ export default function App() {
       <header className="sticky top-0 z-30 bg-[#FFF8FC]/90 backdrop-blur-md border-b-2 border-[#19154E]">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 h-20 flex items-center justify-between gap-4">
           <div className="flex items-center gap-3.5">
-            <div className="w-12 h-12 rounded-2xl bg-[#FF7EB6] border-2 border-[#19154E] shadow-[3px_3px_0px_#19154E] flex items-center justify-center">
-              <Instagram className="w-6 h-6 text-white" />
+            <div className="w-12 h-12 rounded-2xl bg-[#FF7EB6] border-2 border-[#19154E] shadow-[3px_3px_0px_#19154E] flex items-center justify-center text-white">
+              <PlatformIcon
+                platform={selectedPlatform === 'all' ? 'globe' : selectedPlatform}
+                className="w-6 h-6"
+              />
             </div>
             <div>
               <div className="flex items-center gap-2.5">
@@ -1642,10 +1929,12 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => setActiveTab('connect')}
-                  title="Switch or connect an Instagram account"
+                  title="Connect or manage Instagram, TikTok, YouTube, Facebook, X & Threads"
                   className="text-xs px-2.5 py-0.5 rounded-full bg-[#C8F904] text-[#19154E] border-2 border-[#19154E] font-bold hover:opacity-90"
                 >
-                  {profile.username ? `@${profile.username}` : '+ Connect IG'}
+                  {connectedPlatformIds.length > 0
+                    ? `${connectedPlatformIds.length} Connected`
+                    : '+ Connect Accounts'}
                 </button>
                 <a
                   href="../index.html"
@@ -1663,13 +1952,24 @@ export default function App() {
                   ? currentUsername
                     ? `Signed in as ${currentUsername} (${currentUserEmail})`
                     : `Signed in as ${currentUserEmail}`
-                  : 'Automated Instagram DM Studio & Growth Observatory'}
+                  : 'Multi-Platform Auto-DM Studio & Live Growth Observatory'}
               </p>
             </div>
           </div>
 
           {/* Tactile Pill Navigation Tabs */}
-          <nav className="flex items-center gap-1.5 bg-[#F5EEFF] p-1.5 rounded-2xl border-2 border-[#19154E]">
+          <nav className="flex flex-wrap items-center gap-1.5 bg-[#F5EEFF] p-1.5 rounded-2xl border-2 border-[#19154E]">
+            <button
+              onClick={() => setActiveTab('planner')}
+              className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs sm:text-sm font-bold transition-colors duration-150 ${
+                activeTab === 'planner'
+                  ? 'bg-[#19154E] text-[#FFF8FC]'
+                  : 'text-[#19154E] hover:bg-white/70'
+              }`}
+            >
+              <Calendar className="w-4 h-4 text-[#C8F904]" />
+              <span>Planner</span>
+            </button>
             <button
               onClick={() => setActiveTab('automations')}
               className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs sm:text-sm font-bold transition-colors duration-150 ${
@@ -1690,7 +1990,7 @@ export default function App() {
               }`}
             >
               <BarChart3 className="w-4 h-4 text-[#C8F904]" />
-              <span>IG Stats</span>
+              <span>Stats</span>
             </button>
             <button
               onClick={() => setActiveTab('strategy')}
@@ -1712,10 +2012,10 @@ export default function App() {
               }`}
             >
               <KeyRound className="w-4 h-4 text-[#A78BFA]" />
-              <span>Connect IG</span>
+              <span>Connect</span>
               <span
                 className={`w-2.5 h-2.5 rounded-full border border-[#19154E] ${
-                  connection?.has_access_token ? 'bg-[#C8F904]' : 'bg-[#B799E8]'
+                  connectedPlatformIds.length > 0 ? 'bg-[#C8F904]' : 'bg-[#B799E8]'
                 }`}
               />
             </button>
@@ -1744,30 +2044,35 @@ export default function App() {
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-center">
             <div className="lg:col-span-8 space-y-4">
               <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-[#B799E8] border-2 border-[#19154E] text-xs font-bold uppercase tracking-wider">
-                <span>🧚‍♀️ TechFairy Magic Automation</span>
+                <span>🧚‍♀️ Omnichannel Creator Hub</span>
+                <span>•</span>
+                <span>{connectedPlatformIds.length}/6 Platforms Connected</span>
                 <span>•</span>
                 <span>{automations.filter((a) => a.active).length} Active Flows</span>
               </div>
 
               <h2 className="font-display text-3xl sm:text-4xl lg:text-5xl font-bold text-[#19154E] leading-[1.06]">
-                Turn every Reel comment into an{' '}
+                Turn every social comment into an{' '}
                 <span className="inline-block px-3 py-0.5 rounded-2xl bg-[#C8F904] border-2 border-[#19154E] -rotate-1">
-                  instant DM
+                  instant reply
                 </span>{' '}
-                & growth strategy.
+                &amp; unified growth strategy.
               </h2>
 
               <p className="text-sm sm:text-base text-neutral-700 max-w-2xl leading-relaxed">
-                When followers comment keywords like{' '}
-                <span className="font-mono-code font-bold px-2 py-0.5 rounded bg-white border border-[#19154E]">
-                  LINK
-                </span>{' '}
-                or{' '}
-                <span className="font-mono-code font-bold px-2 py-0.5 rounded bg-white border border-[#19154E]">
-                  CODE
-                </span>{' '}
-                on <strong>{profile.username ? `@${profile.username}` : 'your Instagram account'}</strong>, our cartoon courier replies in the comments and
-                drops your link straight into their DMs.
+                Connect <strong>Instagram</strong>, <strong>TikTok</strong>, <strong>YouTube</strong>,{' '}
+                <strong>Facebook</strong>, <strong>X</strong>, and <strong>Threads</strong> in one
+                hub. Pull live audience &amp; post telemetry and trigger automated keyword replies on{' '}
+                <strong>
+                  {selectedPlatform === 'all'
+                    ? connectedPlatformIds.length > 0
+                      ? `${connectedPlatformIds.length} connected channel(s)`
+                      : 'your social accounts'
+                    : profile.username
+                    ? `@${profile.username} (${activePlatformMeta?.name})`
+                    : `your ${activePlatformMeta?.name || 'social'} account`}
+                </strong>
+                .
               </p>
 
               {/* Quick Editorial Pill Counters */}
@@ -1778,7 +2083,9 @@ export default function App() {
                       isLiveSynced ? 'bg-emerald-400 animate-pulse' : 'bg-[#FF7EB6]'
                     }`}
                   />
-                  <span className="text-xs font-semibold text-neutral-600">Live Followers:</span>
+                  <span className="text-xs font-semibold text-neutral-600">
+                    Live {activeAudienceLabel}:
+                  </span>
                   <span className="font-display font-bold text-sm">
                     {(profile.followers_count || 0).toLocaleString()}
                   </span>
@@ -1786,7 +2093,7 @@ export default function App() {
 
                 <div className="editorial-card-sm px-4 py-2 bg-white flex items-center gap-2.5">
                   <span className="w-3 h-3 rounded-full bg-[#C8F904] border border-[#19154E]" />
-                  <span className="text-xs font-semibold text-neutral-600">Posts:</span>
+                  <span className="text-xs font-semibold text-neutral-600">{activeContentLabel}:</span>
                   <span className="font-display font-bold text-sm">
                     {(profile.media_count || 0).toLocaleString()}
                   </span>
@@ -1794,21 +2101,19 @@ export default function App() {
 
                 <div className="editorial-card-sm px-4 py-2 bg-white flex items-center gap-2.5">
                   <span className="w-3 h-3 rounded-full bg-[#FF7EB6] border border-[#19154E]" />
-                  <span className="text-xs font-semibold text-neutral-600">#1 Reel Views:</span>
+                  <span className="text-xs font-semibold text-neutral-600">#1 Post Views:</span>
                   <span className="font-display font-bold text-sm">
                     {(topByViews.views || 0).toLocaleString()}
                   </span>
                 </div>
 
-                {!connection?.has_access_token && (
-                  <button
-                    onClick={() => setActiveTab('connect')}
-                    className="editorial-btn px-4 py-2 rounded-2xl bg-[#FF7EB6] text-[#19154E] text-xs font-bold flex items-center gap-1.5"
-                  >
-                    <span>Connect Graph API</span>
-                    <ArrowUpRight className="w-4 h-4" />
-                  </button>
-                )}
+                <button
+                  onClick={() => setActiveTab('connect')}
+                  className="editorial-btn px-4 py-2 rounded-2xl bg-[#FF7EB6] text-[#19154E] text-xs font-bold flex items-center gap-1.5"
+                >
+                  <span>+ Connect Platforms</span>
+                  <ArrowUpRight className="w-4 h-4" />
+                </button>
               </div>
             </div>
 
@@ -1832,6 +2137,111 @@ export default function App() {
         </section>
 
         {/* ============================================================
+            OMNICHANNEL PLATFORM SWITCHER BAR
+        ============================================================ */}
+        {['automations', 'analytics', 'strategy'].includes(activeTab) && (
+          <div className="editorial-card-sm p-3 bg-white flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs font-bold text-[#19154E] px-2">Active Channel:</span>
+              <button
+                type="button"
+                data-testid="switch-platform-all"
+                onClick={() => {
+                  setSelectedPlatform('all');
+                  const snap = getActiveAnalyticsSnapshot(undefined, undefined, 'all');
+                  setOpenclawOutput(runLocalOpenClawAnalysis(openclawPrompt, snap));
+                }}
+                className={`px-3 py-1.5 rounded-xl text-xs font-bold border-2 border-[#19154E] inline-flex items-center gap-1.5 transition-colors duration-150 ${
+                  selectedPlatform === 'all'
+                    ? 'bg-[#19154E] text-[#FFF8FC]'
+                    : 'bg-[#FFF8FC] text-[#19154E] hover:bg-[#EDE9FE]'
+                }`}
+              >
+                <span>🌐 All Platforms</span>
+                <span className="text-[10px] px-1.5 py-0.2 rounded bg-[#C8F904] text-[#19154E] font-extrabold">
+                  {connectedPlatformIds.length}
+                </span>
+              </button>
+
+              {PLATFORMS.map((p) => {
+                const conn = connectionsMap[p.id];
+                const isSelected = selectedPlatform === p.id;
+                return (
+                  <button
+                    key={p.id}
+                    type="button"
+                    data-testid={`switch-platform-${p.id}`}
+                    onClick={() => {
+                      if (!conn?.handle) {
+                        handleSelectConnectPlatform(p.id);
+                        setActiveTab('connect');
+                        return;
+                      }
+                      setSelectedPlatform(p.id);
+                      const snap = getActiveAnalyticsSnapshot(undefined, undefined, p.id);
+                      setOpenclawOutput(runLocalOpenClawAnalysis(openclawPrompt, snap));
+                    }}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-bold border-2 border-[#19154E] inline-flex items-center gap-1.5 transition-colors duration-150 ${
+                      isSelected
+                        ? 'bg-[#C8F904] text-[#19154E] shadow-[2px_2px_0px_#19154E]'
+                        : conn?.handle
+                        ? 'bg-white text-[#19154E] hover:bg-[#FFF8FC]'
+                        : 'bg-neutral-100 text-neutral-500 hover:bg-white hover:text-[#19154E]'
+                    }`}
+                    title={
+                      conn?.handle
+                        ? `View @${conn.handle} on ${p.name}`
+                        : `Click to connect ${p.name}`
+                    }
+                  >
+                    <PlatformIcon platform={p.id} className="w-3.5 h-3.5" />
+                    <span>{p.name}</span>
+                    {conn?.handle ? (
+                      <span className="text-[10px] font-mono-code opacity-80">@{conn.handle}</span>
+                    ) : (
+                      <span className="text-[10px] font-extrabold text-[#6D28D9]">+</span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setActiveTab('connect')}
+              className="text-xs font-bold text-[#6D28D9] hover:underline px-2"
+            >
+              Manage Connections →
+            </button>
+          </div>
+        )}
+
+        {/* ============================================================
+            TAB 0: MULTI-PLATFORM CONTENT PLANNING CALENDAR
+        ============================================================ */}
+        {activeTab === 'planner' && (
+          <PlannerCalendar
+            scopedKey={scopedKey}
+            igHandle={
+              profile.username ||
+              connectionsMap?.instagram?.handle ||
+              connection?.instagram_handle ||
+              ''
+            }
+            igAccessToken={
+              loadSavedTokensMap()?.instagram ||
+              localStorage.getItem(scopedKey('sa_ig_access_token')) ||
+              ''
+            }
+            igAccountId={connection?.account_id || ''}
+            sharedTokensMap={loadSavedTokensMap()}
+            onCreateAutoDmFlow={handleCreatePlannerAutoDmFlow}
+            showToast={showToast}
+            triggerFairyWand={triggerFairyWand}
+          />
+        )}
+
+        {/* ============================================================
             TAB 1: MANYCHAT-STYLE AUTOMATED DM STUDIO
         ============================================================ */}
         {activeTab === 'automations' && (
@@ -1841,10 +2251,10 @@ export default function App() {
               <div className="flex items-center justify-between">
                 <div>
                   <h3 className="font-display text-2xl font-bold text-[#19154E]">
-                    Automated DM Flows
+                    Automated Reply &amp; DM Flows ({activePlatformLabel})
                   </h3>
                   <p className="text-xs font-medium text-neutral-600">
-                    Click any keyword badge below to test it live in the phone simulator →
+                    Click any keyword badge below to test it live in the simulator →
                   </p>
                 </div>
                 <button
@@ -1865,7 +2275,7 @@ export default function App() {
                   <div className="flex items-center justify-between border-b-2 border-[#19154E] pb-3">
                     <h4 className="font-display font-bold text-base text-[#19154E] flex items-center gap-2">
                       <Sparkles className="w-5 h-5 text-[#FF7EB6]" />
-                      <span>Build New Comment-to-DM Flow</span>
+                      <span>Build New Comment-to-DM / Auto-Reply Flow</span>
                     </h4>
                     <button
                       type="button"
@@ -1876,7 +2286,7 @@ export default function App() {
                     </button>
                   </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
                     <div>
                       <label className="block text-xs font-bold text-[#19154E] mb-1">
                         Flow Name
@@ -1892,6 +2302,23 @@ export default function App() {
                     </div>
                     <div>
                       <label className="block text-xs font-bold text-[#19154E] mb-1">
+                        Target Platform
+                      </label>
+                      <select
+                        value={newFlow.platform || 'all'}
+                        onChange={(e) => setNewFlow({ ...newFlow, platform: e.target.value })}
+                        className="w-full px-3.5 py-2.5 rounded-xl bg-[#FFF8FC] border-2 border-[#19154E] text-sm font-bold focus:outline-none focus:bg-white"
+                      >
+                        <option value="all">🌐 All Connected Platforms</option>
+                        {PLATFORMS.map((p) => (
+                          <option key={p.id} value={p.id}>
+                            {p.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-[#19154E] mb-1">
                         When Trigger Happens
                       </label>
                       <select
@@ -1899,7 +2326,7 @@ export default function App() {
                         onChange={(e) => setNewFlow({ ...newFlow, trigger_type: e.target.value })}
                         className="w-full px-3.5 py-2.5 rounded-xl bg-[#FFF8FC] border-2 border-[#19154E] text-sm font-bold focus:outline-none focus:bg-white"
                       >
-                        <option value="comment_keyword">User comments on a Post / Reel</option>
+                        <option value="comment_keyword">User comments on a Post / Video</option>
                         <option value="story_reply">User replies to your Story</option>
                         <option value="dm_keyword">User sends a Direct Message (DM)</option>
                       </select>
@@ -1923,7 +2350,7 @@ export default function App() {
                   {newFlow.trigger_type === 'comment_keyword' && (
                     <div>
                       <label className="block text-xs font-bold text-[#19154E] mb-1">
-                        Step 1: Public Comment Auto-Reply (doubles your Reel comments!)
+                        Step 1: Public Comment Auto-Reply (boosts post engagement!)
                       </label>
                       <input
                         type="text"
@@ -1939,7 +2366,7 @@ export default function App() {
 
                   <div>
                     <label className="block text-xs font-bold text-[#19154E] mb-1">
-                      Step 2: Private Automated DM Message
+                      Step 2: Private Automated DM / Reply Message
                     </label>
                     <textarea
                       rows={2}
@@ -1982,7 +2409,7 @@ export default function App() {
                       type="submit"
                       className="editorial-btn px-6 py-2.5 rounded-2xl bg-[#FF7EB6] text-[#19154E] text-xs font-bold"
                     >
-                      Save & Activate Flow ✨
+                      Save &amp; Activate Flow ✨
                     </button>
                   </div>
                 </form>
@@ -1990,128 +2417,142 @@ export default function App() {
 
               {/* Automation Flow Bento Cards */}
               <div className="space-y-4">
-                {automations.map((flow) => (
-                  <div
-                    key={flow.id}
-                    className={`editorial-card editorial-card-interactive p-5 ${
-                      flow.active ? 'bg-white' : 'bg-[#F5EEFF]/60 opacity-75'
-                    }`}
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="space-y-1.5">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span
-                            className={`text-[11px] font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-lg border-2 border-[#19154E] ${
-                              flow.trigger_type === 'comment_keyword'
-                                ? 'bg-[#FF7EB6] text-[#19154E]'
+                {visibleAutomations.map((flow) => {
+                  const flowPlatMeta =
+                    flow.platform && flow.platform !== 'all'
+                      ? PLATFORM_BY_ID[flow.platform]
+                      : null;
+                  return (
+                    <div
+                      key={flow.id}
+                      className={`editorial-card editorial-card-interactive p-5 ${
+                        flow.active ? 'bg-white' : 'bg-[#F5EEFF]/60 opacity-75'
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="space-y-1.5">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-lg border-2 border-[#19154E] bg-[#EDE9FE] text-[#19154E] inline-flex items-center gap-1">
+                              {flowPlatMeta ? (
+                                <>
+                                  <PlatformIcon platform={flowPlatMeta.id} className="w-3 h-3" />
+                                  <span>{flowPlatMeta.name}</span>
+                                </>
+                              ) : (
+                                <span>🌐 All Platforms</span>
+                              )}
+                            </span>
+                            <span
+                              className={`text-[11px] font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-lg border-2 border-[#19154E] ${
+                                flow.trigger_type === 'comment_keyword'
+                                  ? 'bg-[#FF7EB6] text-[#19154E]'
+                                  : flow.trigger_type === 'story_reply'
+                                  ? 'bg-[#B799E8] text-[#19154E]'
+                                  : 'bg-[#6D28D9] text-white'
+                              }`}
+                            >
+                              {flow.trigger_type === 'comment_keyword'
+                                ? 'Comment → DM'
                                 : flow.trigger_type === 'story_reply'
-                                ? 'bg-[#B799E8] text-[#19154E]'
-                                : 'bg-[#6D28D9] text-white'
+                                ? 'Story Reply → DM'
+                                : 'Direct DM Keyword'}
+                            </span>
+                            <h4 className="font-display font-bold text-base text-[#19154E]">
+                              {flow.name}
+                            </h4>
+                          </div>
+
+                          {/* Interactive Keyword Pills */}
+                          <div className="flex items-center gap-1.5 flex-wrap pt-1">
+                            <span className="text-xs font-bold text-neutral-600">Keywords:</span>
+                            {flow.keywords.map((kw) => (
+                              <button
+                                key={kw}
+                                onClick={() => {
+                                  setSimType(
+                                    flow.trigger_type === 'comment_keyword'
+                                      ? 'comment'
+                                      : flow.trigger_type === 'story_reply'
+                                      ? 'story_reply'
+                                      : 'dm'
+                                  );
+                                  setSimText(`Can you send me ${kw} please?! ✨`);
+                                  triggerFairyWand();
+                                }}
+                                title="Click to load this keyword into the simulator"
+                                className="font-mono-code text-xs font-bold px-2.5 py-0.5 rounded-lg bg-[#C8F904] text-[#19154E] border-2 border-[#19154E] hover:bg-[#B799E8] transition-colors duration-150"
+                              >
+                                &quot;{kw}&quot;
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-2 shrink-0">
+                          <button
+                            onClick={() => handleToggleFlow(flow.id)}
+                            className={`px-3 py-1 rounded-xl text-xs font-bold border-2 border-[#19154E] ${
+                              flow.active
+                                ? 'bg-[#C8F904] text-[#19154E]'
+                                : 'bg-neutral-200 text-neutral-600'
                             }`}
                           >
-                            {flow.trigger_type === 'comment_keyword'
-                              ? 'Reel Comment → DM'
-                              : flow.trigger_type === 'story_reply'
-                              ? 'Story Reply → DM'
-                              : 'Direct DM Keyword'}
-                          </span>
-                          <h4 className="font-display font-bold text-base text-[#19154E]">
-                            {flow.name}
-                          </h4>
-                        </div>
-
-                        {/* Interactive Keyword Pills */}
-                        <div className="flex items-center gap-1.5 flex-wrap pt-1">
-                          <span className="text-xs font-bold text-neutral-600">Keywords:</span>
-                          {flow.keywords.map((kw) => (
-                            <button
-                              key={kw}
-                              onClick={() => {
-                                setSimType(
-                                  flow.trigger_type === 'comment_keyword'
-                                    ? 'comment'
-                                    : flow.trigger_type === 'story_reply'
-                                    ? 'story_reply'
-                                    : 'dm'
-                                );
-                                setSimText(
-                                  `Can you send me ${kw} please?! ✨`
-                                );
-                                triggerFairyWand();
-                              }}
-                              title="Click to load this keyword into the simulator"
-                              className="font-mono-code text-xs font-bold px-2.5 py-0.5 rounded-lg bg-[#C8F904] text-[#19154E] border-2 border-[#19154E] hover:bg-[#B799E8] transition-colors duration-150"
-                            >
-                              &quot;{kw}&quot;
-                            </button>
-                          ))}
+                            {flow.active ? '● LIVE' : 'PAUSED'}
+                          </button>
+                          <button
+                            onClick={() => handleDeleteFlow(flow.id)}
+                            className="p-1.5 rounded-xl border-2 border-transparent hover:border-[#19154E] text-neutral-500 hover:text-[#FF7EB6] transition-colors duration-150"
+                            title="Delete flow"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
                         </div>
                       </div>
 
-                      <div className="flex items-center gap-2 shrink-0">
-                        <button
-                          onClick={() => handleToggleFlow(flow.id)}
-                          className={`px-3 py-1 rounded-xl text-xs font-bold border-2 border-[#19154E] ${
-                            flow.active
-                              ? 'bg-[#C8F904] text-[#19154E]'
-                              : 'bg-neutral-200 text-neutral-600'
-                          }`}
-                        >
-                          {flow.active ? '● LIVE' : 'PAUSED'}
-                        </button>
-                        <button
-                          onClick={() => handleDeleteFlow(flow.id)}
-                          className="p-1.5 rounded-xl border-2 border-transparent hover:border-[#19154E] text-neutral-500 hover:text-[#FF7EB6] transition-colors duration-150"
-                          title="Delete flow"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* Two-Column Action Preview */}
-                    <div className="mt-4 pt-3.5 border-t-2 border-dashed border-neutral-300 grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                      {flow.public_comment_reply ? (
-                        <div className="p-3 rounded-2xl bg-[#FFF8FC] border-2 border-[#19154E]">
-                          <div className="font-bold text-[#19154E] mb-1">
-                            💬 1. Auto-Reply in Comments:
+                      {/* Two-Column Action Preview */}
+                      <div className="mt-4 pt-3.5 border-t-2 border-dashed border-neutral-300 grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                        {flow.public_comment_reply ? (
+                          <div className="p-3 rounded-2xl bg-[#FFF8FC] border-2 border-[#19154E]">
+                            <div className="font-bold text-[#19154E] mb-1">
+                              💬 1. Auto-Reply in Comments:
+                            </div>
+                            <p className="text-neutral-700 font-medium">{flow.public_comment_reply}</p>
                           </div>
-                          <p className="text-neutral-700 font-medium">{flow.public_comment_reply}</p>
-                        </div>
-                      ) : (
-                        <div className="p-3 rounded-2xl bg-[#FFF8FC]/60 border-2 border-dashed border-neutral-400 flex items-center text-neutral-500 font-medium">
-                          1. Direct DM Flow (No public comment reply)
-                        </div>
-                      )}
-
-                      <div className="p-3 rounded-2xl bg-[#EDE9FE] border-2 border-[#19154E]">
-                        <div className="font-bold text-[#6D28D9] mb-1">
-                          ✉️ 2. Private DM Sent:
-                        </div>
-                        <p className="text-[#19154E] font-medium line-clamp-2">{flow.dm_message}</p>
-                        {flow.dm_button_text && (
-                          <div className="mt-2 inline-flex items-center gap-1.5 px-3 py-1 rounded-xl bg-[#19154E] text-white text-[11px] font-bold">
-                            <span>{flow.dm_button_text}</span>
-                            <ExternalLink className="w-3 h-3" />
+                        ) : (
+                          <div className="p-3 rounded-2xl bg-[#FFF8FC]/60 border-2 border-dashed border-neutral-400 flex items-center text-neutral-500 font-medium">
+                            1. Direct DM Flow (No public comment reply)
                           </div>
                         )}
+
+                        <div className="p-3 rounded-2xl bg-[#EDE9FE] border-2 border-[#19154E]">
+                          <div className="font-bold text-[#6D28D9] mb-1">
+                            ✉️ 2. Private DM Sent:
+                          </div>
+                          <p className="text-[#19154E] font-medium line-clamp-2">{flow.dm_message}</p>
+                          {flow.dm_button_text && (
+                            <div className="mt-2 inline-flex items-center gap-1.5 px-3 py-1 rounded-xl bg-[#19154E] text-white text-[11px] font-bold">
+                              <span>{flow.dm_button_text}</span>
+                              <ExternalLink className="w-3 h-3" />
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Flow Metrics Footer */}
+                      <div className="mt-3.5 flex items-center gap-6 text-xs font-bold text-neutral-600">
+                        <span>
+                          Triggered: <strong className="text-[#19154E]">{flow.stats?.triggered || 0}</strong>
+                        </span>
+                        <span>
+                          DMs Delivered: <strong className="text-[#6D28D9]">{flow.stats?.dms_sent || 0}</strong>
+                        </span>
+                        <span>
+                          Link Clicks: <strong className="text-[#FF7EB6]">{flow.stats?.link_clicks || 0}</strong>
+                        </span>
                       </div>
                     </div>
-
-                    {/* Flow Metrics Footer */}
-                    <div className="mt-3.5 flex items-center gap-6 text-xs font-bold text-neutral-600">
-                      <span>
-                        Triggered: <strong className="text-[#19154E]">{flow.stats?.triggered || 0}</strong>
-                      </span>
-                      <span>
-                        DMs Delivered: <strong className="text-[#6D28D9]">{flow.stats?.dms_sent || 0}</strong>
-                      </span>
-                      <span>
-                        Link Clicks: <strong className="text-[#FF7EB6]">{flow.stats?.link_clicks || 0}</strong>
-                      </span>
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
 
@@ -2121,7 +2562,7 @@ export default function App() {
                 <div className="flex items-center justify-between">
                   <div>
                     <span className="text-[11px] font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-full bg-[#B799E8] border-2 border-[#19154E]">
-                      Interactive Sandbox
+                      Interactive Sandbox • {activePlatformLabel}
                     </span>
                     <h3 className="font-display font-bold text-lg text-[#19154E] mt-1">
                       Live Comment-to-DM Simulator
@@ -2140,7 +2581,7 @@ export default function App() {
                         onChange={(e) => setSimType(e.target.value)}
                         className="w-full px-3 py-2 rounded-xl bg-[#FFF8FC] border-2 border-[#19154E] text-xs font-bold"
                       >
-                        <option value="comment">Comment on Reel</option>
+                        <option value="comment">Comment on Post / Video</option>
                         <option value="story_reply">Story Reply</option>
                         <option value="dm">Direct Message</option>
                       </select>
@@ -2184,7 +2625,7 @@ export default function App() {
                 <div className="rounded-3xl bg-[#19154E] text-white p-4 border-2 border-[#19154E] space-y-3">
                   <div className="flex items-center justify-between border-b border-neutral-800 pb-2.5 text-xs">
                     <span className="font-display font-bold text-[#FFF8FC]">
-                      📱 @{profile.username} Inbox
+                      📱 {profile.username ? `@${profile.username}` : activePlatformLabel} Inbox
                     </span>
                     {simResult?.matched && (
                       <span className="px-2 py-0.5 rounded-full bg-[#C8F904] text-[#19154E] text-[10px] font-bold">
@@ -2230,7 +2671,7 @@ export default function App() {
                       <div className="flex items-start justify-end pt-1">
                         <div className="max-w-[88%] p-3.5 rounded-2xl rounded-tr-none bg-[#6D28D9] text-white border-2 border-white shadow-lg">
                           <div className="text-[10px] text-[#C8F904] font-bold uppercase tracking-wider mb-1">
-                            ✨ Automated DM from @{profile.username}
+                            ✨ Automated DM from {profile.username ? `@${profile.username}` : 'Creator'}
                           </div>
                           <p className="leading-relaxed font-medium">{simResult.log.dm_sent}</p>
                           {simResult.log.dm_button_text && (
@@ -2295,7 +2736,12 @@ export default function App() {
               <div className="lg:col-span-8 space-y-3">
                 <div className="flex flex-wrap items-center gap-2">
                   <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-[#EDE9FE] border-2 border-[#19154E] text-xs font-bold text-[#6D28D9]">
-                    <span>🔭 @{profile.username || 'your_account'} Live Instagram Telemetry</span>
+                    <span>
+                      🔭{' '}
+                      {selectedPlatform === 'all'
+                        ? `Omnichannel Telemetry (${connectedPlatformIds.length} Connected)`
+                        : `@${profile.username || 'your_account'} Live ${activePlatformLabel} Telemetry`}
+                    </span>
                   </div>
                   <div
                     className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full border-2 border-[#19154E] text-xs font-bold ${
@@ -2309,26 +2755,31 @@ export default function App() {
                     />
                     <span>
                       {isGraphApiLive
-                        ? 'Official Graph API Live'
+                        ? `Official ${activePlatformLabel} API Live`
                         : isLiveSynced
-                        ? 'Live from Instagram'
-                        : 'Offline Snapshot'}
+                        ? `Live Synced (${activePlatformLabel})`
+                        : 'Connect an Account to Sync'}
                       {syncedTimeLabel ? ` • Synced ${syncedTimeLabel}` : ''}
                     </span>
                   </div>
                 </div>
 
                 <h3 className="font-display text-2xl sm:text-3xl font-bold text-[#19154E]">
-                  Live Instagram Reels by{' '}
+                  Live {activePlatformLabel} {activeContentLabel} by{' '}
                   <span className="px-2.5 py-0.5 rounded-xl bg-[#FF7EB6] border-2 border-[#19154E]">
                     Views, Likes &amp; Engagement
                   </span>{' '}
                   + US Active Windows
                 </h3>
                 <p className="text-xs sm:text-sm text-neutral-700 leading-relaxed">
-                  Pulling real-time follower counts, post counts, and per-Reel views, likes, comments,
-                  and engagement rates directly from <strong>@{profile.username || 'your_account'}</strong> on Instagram.
-                  Auto-refreshes every 90s or click <strong>Sync Live Instagram Metrics</strong> anytime.
+                  Pulling real-time {activeAudienceLabel.toLowerCase()}, post counts, and per-post
+                  views, likes, comments, and engagement rates directly from{' '}
+                  <strong>
+                    {selectedPlatform === 'all'
+                      ? 'all connected social accounts'
+                      : `@${profile.username || 'your_account'} on ${activePlatformLabel}`}
+                  </strong>
+                  . Auto-refreshes every 90s or click <strong>Sync Live Metrics</strong> anytime.
                 </p>
                 <div className="pt-1 flex flex-wrap items-center gap-2.5">
                   <button
@@ -2337,7 +2788,11 @@ export default function App() {
                     className="editorial-btn px-4 py-2 rounded-xl bg-[#C8F904] text-[#19154E] text-xs font-bold inline-flex items-center gap-2"
                   >
                     <RefreshCw className={`w-4 h-4 ${syncing ? 'animate-spin' : ''}`} />
-                    <span>{syncing ? 'Syncing Live from Instagram...' : 'Sync Live Instagram Metrics'}</span>
+                    <span>
+                      {syncing
+                        ? `Syncing Live ${activePlatformLabel}...`
+                        : `Sync Live ${activePlatformLabel} Metrics`}
+                    </span>
                   </button>
                   <button
                     onClick={() => {
@@ -2358,25 +2813,114 @@ export default function App() {
               </div>
             </div>
 
-            {/* 6 Bold Editorial Metric Cards — 100% Live Instagram Numbers */}
+            {/* Connected Platforms Breakdown Grid (All Platforms View) */}
+            {selectedPlatform === 'all' &&
+              Array.isArray(analyticsData?.platform_breakdown) &&
+              analyticsData.platform_breakdown.length > 0 && (
+                <div className="editorial-card p-5 bg-white space-y-3.5">
+                  <div className="flex items-center justify-between">
+                    <h4 className="font-display font-bold text-base sm:text-lg text-[#19154E]">
+                      🌐 Connected Channels Breakdown ({analyticsData.platform_breakdown.length})
+                    </h4>
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab('connect')}
+                      className="text-xs font-bold text-[#6D28D9] hover:underline"
+                    >
+                      + Connect Another Platform
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3.5">
+                    {analyticsData.platform_breakdown.map((item) => {
+                      const pMeta = PLATFORM_BY_ID[item.platform] || PLATFORM_BY_ID.instagram;
+                      return (
+                        <div
+                          key={item.platform}
+                          className="p-4 rounded-2xl bg-[#FFF8FC] border-2 border-[#19154E] flex flex-col justify-between gap-3"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="flex items-center gap-2">
+                              <span
+                                className="w-8 h-8 rounded-xl border-2 border-[#19154E] flex items-center justify-center"
+                                style={{
+                                  backgroundColor: pMeta.badgeBg,
+                                  color: pMeta.badgeText,
+                                }}
+                              >
+                                <PlatformIcon platform={pMeta.id} className="w-4 h-4" />
+                              </span>
+                              <div>
+                                <div className="font-display font-bold text-sm text-[#19154E]">
+                                  {pMeta.name}
+                                </div>
+                                <div className="text-xs font-mono-code font-bold text-[#6D28D9]">
+                                  @{item.handle}
+                                </div>
+                              </div>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => setSelectedPlatform(pMeta.id)}
+                              className="px-2.5 py-1 rounded-lg bg-[#C8F904] border border-[#19154E] text-[11px] font-bold text-[#19154E] hover:opacity-90"
+                            >
+                              View →
+                            </button>
+                          </div>
+                          <div className="grid grid-cols-3 gap-2 pt-2 border-t border-neutral-200 text-center">
+                            <div>
+                              <div className="text-[10px] font-bold uppercase text-neutral-500">
+                                {pMeta.audienceLabel}
+                              </div>
+                              <div className="font-display font-bold text-sm text-[#19154E]">
+                                {(item.followers_count || 0).toLocaleString()}
+                              </div>
+                            </div>
+                            <div>
+                              <div className="text-[10px] font-bold uppercase text-neutral-500">
+                                Tracked Views
+                              </div>
+                              <div className="font-display font-bold text-sm text-[#19154E]">
+                                {(item.total_views || 0).toLocaleString()}
+                              </div>
+                            </div>
+                            <div>
+                              <div className="text-[10px] font-bold uppercase text-neutral-500">
+                                Likes
+                              </div>
+                              <div className="font-display font-bold text-sm text-[#19154E]">
+                                {(item.total_likes || 0).toLocaleString()}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+            {/* 6 Bold Editorial Metric Cards — Live Multi-Platform Numbers */}
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">
               <div className="editorial-card-sm p-4 bg-white">
                 <div className="text-xs font-bold text-neutral-500 flex items-center justify-between">
-                  <span>LIVE FOLLOWERS</span>
-                  <Instagram className="w-4 h-4 text-[#FF7EB6]" />
+                  <span>LIVE {activeAudienceLabel.toUpperCase()}</span>
+                  <PlatformIcon
+                    platform={selectedPlatform === 'all' ? 'globe' : selectedPlatform}
+                    className="w-4 h-4 text-[#FF7EB6]"
+                  />
                 </div>
                 <div className="font-display text-2xl font-bold text-[#19154E] mt-1.5">
                   {(profile.followers_count || 0).toLocaleString()}
                 </div>
                 <div className="text-[11px] font-bold text-emerald-700 mt-1">
-                  {(profile.media_count || 0).toLocaleString()} posts
+                  {(profile.media_count || 0).toLocaleString()} {activeContentLabel.toLowerCase()}
                   {profile.follows_count ? ` • ${profile.follows_count} following` : ''}
                 </div>
               </div>
 
               <div className="editorial-card-sm p-4 bg-[#FF7EB6]">
                 <div className="text-xs font-bold text-[#19154E] flex items-center justify-between">
-                  <span>#1 REEL VIEWS</span>
+                  <span>#1 POST VIEWS</span>
                   <Eye className="w-4 h-4 text-[#19154E]" />
                 </div>
                 <div className="font-display text-2xl font-bold text-[#19154E] mt-1.5">
@@ -2396,7 +2940,7 @@ export default function App() {
                   {(summary.total_views || 0).toLocaleString()}
                 </div>
                 <div className="text-[11px] font-bold text-emerald-700 mt-1">
-                  Across {posts.length} live Reels
+                  Across {posts.length} synced items
                 </div>
               </div>
 
@@ -2409,7 +2953,7 @@ export default function App() {
                   {(summary.total_likes || 0).toLocaleString()}
                 </div>
                 <div className="text-[11px] font-bold text-[#19154E] mt-1">
-                  Avg {avgLikesPerPost.toLocaleString()} likes / Reel
+                  Avg {avgLikesPerPost.toLocaleString()} likes / post
                 </div>
               </div>
 
@@ -2422,7 +2966,7 @@ export default function App() {
                   {(summary.total_comments || 0).toLocaleString()}
                 </div>
                 <div className="text-[11px] font-bold text-[#19154E] mt-1">
-                  Top Reel: {(topByComments.comments || 0).toLocaleString()} comments
+                  Top Post: {(topByComments.comments || 0).toLocaleString()} comments
                 </div>
               </div>
 
@@ -2436,27 +2980,29 @@ export default function App() {
                 </div>
                 <div className="text-[11px] font-semibold text-neutral-600 mt-1">
                   {typeof summary.total_followers_gained === 'number'
-                    ? `+${summary.total_followers_gained.toLocaleString()} followers (Graph API)`
+                    ? `+${summary.total_followers_gained.toLocaleString()} followers (API)`
                     : `(Likes + Comments) ÷ Views`}
                 </div>
               </div>
             </div>
 
             {/* ============================================================
-                GOAL 1 & 2: LIVE INSTAGRAM REELS RANKING
+                GOAL 1 & 2: LIVE POSTS / VIDEOS RANKING
                 & STRUCTURED TEXT SUMMARIES FOR OPENCLAW AGENT
             ============================================================ */}
             <div className="editorial-card bg-white overflow-hidden">
               <div className="p-5 border-b-2 border-[#19154E] bg-[#F5EEFF] flex flex-col lg:flex-row lg:items-center justify-between gap-4">
                 <div>
                   <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-[#FF7EB6] border border-[#19154E] text-[11px] font-bold text-[#19154E] mb-1">
-                    <span>🎬 Live Instagram Reels Performance &amp; Agent Text Summaries</span>
+                    <span>🎬 Live {activePlatformLabel} Performance &amp; Agent Text Summaries</span>
                   </div>
                   <h3 className="font-display font-bold text-lg sm:text-xl text-[#19154E]">
-                    Live Reels on @{profile.username || 'your_account'} (Direct from Instagram)
+                    {selectedPlatform === 'all'
+                      ? 'Top Synced Videos & Posts Across All Connected Platforms'
+                      : `Live ${activeContentLabel} on @${profile.username || 'your_account'} (${activePlatformLabel})`}
                   </h3>
                   <p className="text-xs font-medium text-neutral-700">
-                    Live views, likes, comments, and engagement rates pulled directly from Instagram, paired with structured summaries for OpenClaw.
+                    Live views, likes, comments, and engagement rates pulled directly from {activePlatformLabel}, paired with structured summaries for OpenClaw.
                   </p>
                 </div>
 
@@ -2519,200 +3065,229 @@ export default function App() {
               </div>
 
               <div className="p-5 space-y-4">
-                {sortedPosts.map((post, idx) => (
-                  <div
-                    key={post.id}
-                    className={`rounded-2xl border-2 border-[#19154E] p-4 sm:p-5 transition-colors duration-150 ${
-                      idx === 0
-                        ? 'bg-gradient-to-r from-[#FFF8FC] via-[#FFFDF9] to-[#F5EEFF] shadow-[4px_4px_0px_#19154E]'
-                        : 'bg-white'
-                    }`}
-                  >
-                    <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 border-b-2 border-dashed border-neutral-200 pb-3.5">
-                      <div className="flex items-start gap-3.5">
-                        {post.thumbnail_url && (
-                          <a
-                            href={post.permalink}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="relative shrink-0 group"
-                            title="Open Reel on Instagram"
-                          >
-                            <img
-                              src={post.thumbnail_url}
-                              alt={post.title}
-                              onError={(e) => {
-                                if (
-                                  post.fallback_thumbnail_url &&
-                                  e.currentTarget.src !== post.fallback_thumbnail_url &&
-                                  !e.currentTarget.dataset.fallbackApplied
-                                ) {
-                                  e.currentTarget.dataset.fallbackApplied = 'true';
-                                  e.currentTarget.src = post.fallback_thumbnail_url;
-                                }
-                              }}
-                              className="w-20 h-28 sm:w-24 sm:h-32 rounded-xl border-2 border-[#19154E] object-cover shadow-[2px_2px_0px_#19154E] bg-[#19154E] group-hover:scale-[1.02] transition-transform duration-150"
-                            />
-                            <span className="absolute bottom-1 left-1 right-1 text-center text-[9px] font-extrabold px-1 py-0.5 rounded bg-[#19154E]/90 text-[#C8F904]">
-                              ▶ {(post.views || 0).toLocaleString()}
-                            </span>
-                          </a>
-                        )}
-                        <div className="space-y-1">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <span
-                              className={`text-xs font-extrabold px-2.5 py-0.5 rounded-lg border-2 border-[#19154E] ${
-                                idx === 0
-                                  ? 'bg-[#C8F904] text-[#19154E]'
-                                  : idx === 1
-                                  ? 'bg-[#FF7EB6] text-[#19154E]'
-                                  : idx === 2
-                                  ? 'bg-[#B799E8] text-[#19154E]'
-                                  : 'bg-neutral-100 text-[#19154E]'
-                              }`}
-                            >
-                              #{idx + 1} {idx === 0 ? 'TOP PERFORMER' : idx < 3 ? 'HIGH PERFORMER' : 'LIVE REEL'}
-                            </span>
-                            <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-lg border border-[#19154E] bg-[#EDE9FE] text-[#6D28D9]">
-                              {post.type} • {post.published_label || 'Reel'}
-                              {post.duration_sec ? ` • ${post.duration_sec}s` : ''}
-                            </span>
-                            {post.best_keyword && !post.best_keyword.includes('None') && (
-                              <span className="font-mono-code text-[11px] font-bold px-2.5 py-0.5 rounded-lg bg-[#C8F904] text-[#19154E] border border-[#19154E]">
-                                Trigger: &quot;{post.best_keyword}&quot;
-                              </span>
-                            )}
-                            {post.permalink && (
+                {sortedPosts.length === 0 ? (
+                  <div className="p-8 text-center rounded-2xl bg-[#FFF8FC] border-2 border-dashed border-[#19154E] space-y-3">
+                    <p className="font-display font-bold text-base text-[#19154E]">
+                      {isUnconnected
+                        ? 'No social accounts connected yet.'
+                        : `Synced profile telemetry for @${profile.username} (${(profile.followers_count || 0).toLocaleString()} ${activeAudienceLabel.toLowerCase()}).`}
+                    </p>
+                    <p className="text-xs text-neutral-600 font-medium max-w-xl mx-auto">
+                      {isUnconnected
+                        ? 'Connect Instagram, TikTok, YouTube, Facebook, X, or Threads to pull live audience and post stats into your isolated workspace.'
+                        : 'Public profile counts are live! Add an optional developer API token in Connect → Advanced Settings if this platform restricts individual post timelines.'}
+                    </p>
+                  </div>
+                ) : (
+                  sortedPosts.map((post, idx) => {
+                    const pMeta = PLATFORM_BY_ID[post.platform] || PLATFORM_BY_ID.instagram;
+                    return (
+                      <div
+                        key={`${post.platform}-${post.id}`}
+                        className={`rounded-2xl border-2 border-[#19154E] p-4 sm:p-5 transition-colors duration-150 ${
+                          idx === 0
+                            ? 'bg-gradient-to-r from-[#FFF8FC] via-[#FFFDF9] to-[#F5EEFF] shadow-[4px_4px_0px_#19154E]'
+                            : 'bg-white'
+                        }`}
+                      >
+                        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 border-b-2 border-dashed border-neutral-200 pb-3.5">
+                          <div className="flex items-start gap-3.5">
+                            {post.thumbnail_url && (
                               <a
                                 href={post.permalink}
                                 target="_blank"
                                 rel="noreferrer"
-                                className="text-[11px] font-bold px-2.5 py-0.5 rounded-lg bg-white border border-[#19154E] text-[#19154E] hover:bg-[#C8F904] inline-flex items-center gap-1 transition-colors duration-150"
+                                className="relative shrink-0 group"
+                                title={`Open on ${pMeta.name}`}
                               >
-                                <span>Instagram</span>
-                                <ExternalLink className="w-3 h-3" />
+                                <img
+                                  src={post.thumbnail_url}
+                                  alt={post.title}
+                                  onError={(e) => {
+                                    if (
+                                      post.fallback_thumbnail_url &&
+                                      e.currentTarget.src !== post.fallback_thumbnail_url &&
+                                      !e.currentTarget.dataset.fallbackApplied
+                                    ) {
+                                      e.currentTarget.dataset.fallbackApplied = 'true';
+                                      e.currentTarget.src = post.fallback_thumbnail_url;
+                                    }
+                                  }}
+                                  className="w-20 h-28 sm:w-24 sm:h-32 rounded-xl border-2 border-[#19154E] object-cover shadow-[2px_2px_0px_#19154E] bg-[#19154E] group-hover:scale-[1.02] transition-transform duration-150"
+                                />
+                                <span className="absolute bottom-1 left-1 right-1 text-center text-[9px] font-extrabold px-1 py-0.5 rounded bg-[#19154E]/90 text-[#C8F904]">
+                                  ▶ {(post.views || 0).toLocaleString()}
+                                </span>
                               </a>
                             )}
-                          </div>
-                          <h4 className="font-display font-bold text-base sm:text-lg text-[#19154E]">
-                            {post.title}
-                          </h4>
-                          <p className="text-xs text-neutral-600 line-clamp-2">{post.caption}</p>
-                        </div>
-                      </div>
-
-                      {/* Key Live Performance Badges */}
-                      <div className="flex flex-wrap items-center gap-2.5 shrink-0">
-                        <div className="px-3.5 py-2 rounded-xl bg-[#C8F904] border-2 border-[#19154E] text-center">
-                          <div className="text-[10px] font-extrabold uppercase text-[#19154E]">
-                            Live Views
-                          </div>
-                          <div className="font-display font-bold text-base text-[#19154E]">
-                            {(post.views || 0).toLocaleString()}
-                          </div>
-                        </div>
-
-                        <div className="px-3.5 py-2 rounded-xl bg-[#FF7EB6] border-2 border-[#19154E] text-center">
-                          <div className="text-[10px] font-extrabold uppercase text-[#19154E]">
-                            Live Likes
-                          </div>
-                          <div className="font-display font-bold text-base text-[#19154E]">
-                            {(post.likes || 0).toLocaleString()}
-                          </div>
-                        </div>
-
-                        <div className="px-3 py-2 rounded-xl bg-[#F5EEFF] border-2 border-[#19154E] text-center">
-                          <div className="text-[10px] font-bold uppercase text-[#6D28D9]">
-                            Comments
-                          </div>
-                          <div className="font-display font-bold text-sm text-[#19154E]">
-                            {(post.comments || 0).toLocaleString()}
-                          </div>
-                        </div>
-
-                        <div className="px-3 py-2 rounded-xl bg-white border-2 border-[#19154E] text-center">
-                          <div className="text-[10px] font-bold uppercase text-neutral-500">
-                            Eng. Rate
-                          </div>
-                          <div className="font-display font-bold text-sm text-[#19154E]">
-                            {post.engagement_rate}%
-                          </div>
-                        </div>
-
-                        {typeof post.followers_gained === 'number' && (
-                          <div className="px-3 py-2 rounded-xl bg-[#EDE9FE] border-2 border-[#19154E] text-center">
-                            <div className="text-[10px] font-bold uppercase text-[#6D28D9]">
-                              +Followers
-                            </div>
-                            <div className="font-display font-bold text-sm text-[#19154E]">
-                              +{post.followers_gained.toLocaleString()}
+                            <div className="space-y-1">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span
+                                  className={`text-xs font-extrabold px-2.5 py-0.5 rounded-lg border-2 border-[#19154E] ${
+                                    idx === 0
+                                      ? 'bg-[#C8F904] text-[#19154E]'
+                                      : idx === 1
+                                      ? 'bg-[#FF7EB6] text-[#19154E]'
+                                      : idx === 2
+                                      ? 'bg-[#B799E8] text-[#19154E]'
+                                      : 'bg-neutral-100 text-[#19154E]'
+                                  }`}
+                                >
+                                  #{idx + 1}{' '}
+                                  {idx === 0 ? 'TOP PERFORMER' : idx < 3 ? 'HIGH PERFORMER' : 'LIVE POST'}
+                                </span>
+                                <span
+                                  className="text-[11px] font-extrabold px-2.5 py-0.5 rounded-lg border border-[#19154E] inline-flex items-center gap-1"
+                                  style={{
+                                    backgroundColor: pMeta.badgeBg,
+                                    color: pMeta.badgeText,
+                                  }}
+                                >
+                                  <PlatformIcon platform={pMeta.id} className="w-3 h-3" />
+                                  <span>{pMeta.name.toUpperCase()}</span>
+                                </span>
+                                <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-lg border border-[#19154E] bg-[#EDE9FE] text-[#6D28D9]">
+                                  {post.type || 'POST'} • {post.published_label}
+                                  {post.duration_sec ? ` • ${post.duration_sec}s` : ''}
+                                </span>
+                                {post.best_keyword && !post.best_keyword.includes('None') && (
+                                  <span className="font-mono-code text-[11px] font-bold px-2.5 py-0.5 rounded-lg bg-[#C8F904] text-[#19154E] border border-[#19154E]">
+                                    Trigger: &quot;{post.best_keyword}&quot;
+                                  </span>
+                                )}
+                                {post.permalink && (
+                                  <a
+                                    href={post.permalink}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="text-[11px] font-bold px-2.5 py-0.5 rounded-lg bg-white border border-[#19154E] text-[#19154E] hover:bg-[#C8F904] inline-flex items-center gap-1 transition-colors duration-150"
+                                  >
+                                    <span>{pMeta.name}</span>
+                                    <ExternalLink className="w-3 h-3" />
+                                  </a>
+                                )}
+                              </div>
+                              <h4 className="font-display font-bold text-base sm:text-lg text-[#19154E]">
+                                {post.title}
+                              </h4>
+                              <p className="text-xs text-neutral-600 line-clamp-2">{post.caption}</p>
                             </div>
                           </div>
-                        )}
-                      </div>
-                    </div>
 
-                    {/* Structured Text Summary Box for Agent Analysis */}
-                    <div className="mt-3.5 p-3.5 rounded-xl bg-[#FFF8FC] border-2 border-[#19154E] space-y-2">
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <span className="text-[11px] font-extrabold uppercase tracking-wider text-[#6D28D9] flex items-center gap-1.5">
-                          <span>📝 Video Text Summary &amp; Live Metrics (For AI Agent Analysis)</span>
-                        </span>
-                        <div className="flex items-center gap-2">
-                          <button
-                            type="button"
-                            onClick={() =>
-                              copyToClipboard(
-                                `${post.title}\nPermalink: ${post.permalink}\nLive Views: ${(post.views || 0).toLocaleString()} | Live Likes: ${(post.likes || 0).toLocaleString()} | Live Comments: ${(post.comments || 0).toLocaleString()} | ER: ${post.engagement_rate}%\nSummary: ${post.video_summary_text}`,
-                                `summary-${post.id}`
-                              )
-                            }
-                            className="px-2.5 py-1 rounded-lg bg-white border border-[#19154E] text-[11px] font-bold text-[#19154E] hover:bg-[#EDE9FE] inline-flex items-center gap-1"
-                          >
-                            {copiedField === `summary-${post.id}` ? (
-                              <>
-                                <Check className="w-3 h-3 text-emerald-700" />
-                                <span>Copied!</span>
-                              </>
-                            ) : (
-                              <>
-                                <Copy className="w-3 h-3" />
-                                <span>Copy Summary</span>
-                              </>
+                          {/* Key Live Performance Badges */}
+                          <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+                            <div className="px-3.5 py-2 rounded-xl bg-[#C8F904] border-2 border-[#19154E] text-center">
+                              <div className="text-[10px] font-extrabold uppercase text-[#19154E]">
+                                Live Views
+                              </div>
+                              <div className="font-display font-bold text-base text-[#19154E]">
+                                {(post.views || 0).toLocaleString()}
+                              </div>
+                            </div>
+
+                            <div className="px-3.5 py-2 rounded-xl bg-[#FF7EB6] border-2 border-[#19154E] text-center">
+                              <div className="text-[10px] font-extrabold uppercase text-[#19154E]">
+                                Live Likes
+                              </div>
+                              <div className="font-display font-bold text-base text-[#19154E]">
+                                {(post.likes || 0).toLocaleString()}
+                              </div>
+                            </div>
+
+                            <div className="px-3 py-2 rounded-xl bg-[#F5EEFF] border-2 border-[#19154E] text-center">
+                              <div className="text-[10px] font-bold uppercase text-[#6D28D9]">
+                                Comments
+                              </div>
+                              <div className="font-display font-bold text-sm text-[#19154E]">
+                                {(post.comments || 0).toLocaleString()}
+                              </div>
+                            </div>
+
+                            <div className="px-3 py-2 rounded-xl bg-white border-2 border-[#19154E] text-center">
+                              <div className="text-[10px] font-bold uppercase text-neutral-500">
+                                Eng. Rate
+                              </div>
+                              <div className="font-display font-bold text-sm text-[#19154E]">
+                                {post.engagement_rate}%
+                              </div>
+                            </div>
+
+                            {typeof post.followers_gained === 'number' && (
+                              <div className="px-3 py-2 rounded-xl bg-[#EDE9FE] border-2 border-[#19154E] text-center">
+                                <div className="text-[10px] font-bold uppercase text-[#6D28D9]">
+                                  +Followers
+                                </div>
+                                <div className="font-display font-bold text-sm text-[#19154E]">
+                                  +{post.followers_gained.toLocaleString()}
+                                </div>
+                              </div>
                             )}
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const customP = `Analyze this live Instagram Reel for "${post.title}" (${(post.views || 0).toLocaleString()} live views, ${(post.likes || 0).toLocaleString()} likes, ${(post.comments || 0).toLocaleString()} comments, ${post.engagement_rate}% engagement rate): ${post.video_summary_text} — Why did it perform this way and how can I replicate or improve it for my US audience?`;
-                              setActiveTab('strategy');
-                              handleRunOpenClaw(customP);
-                            }}
-                            className="px-2.5 py-1 rounded-lg bg-[#19154E] text-[#FFF8FC] text-[11px] font-bold hover:bg-[#6D28D9] inline-flex items-center gap-1"
-                          >
-                            <span>🦞 Send to OpenClaw Agent</span>
-                          </button>
+                          </div>
+                        </div>
+
+                        {/* Structured Text Summary Box for Agent Analysis */}
+                        <div className="mt-3.5 p-3.5 rounded-xl bg-[#FFF8FC] border-2 border-[#19154E] space-y-2">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <span className="text-[11px] font-extrabold uppercase tracking-wider text-[#6D28D9] flex items-center gap-1.5">
+                              <span>📝 Post Summary &amp; Live Metrics (For AI Agent Analysis)</span>
+                            </span>
+                            <div className="flex items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  copyToClipboard(
+                                    `[${pMeta.name}] ${post.title}\nPermalink: ${post.permalink}\nLive Views: ${(post.views || 0).toLocaleString()} | Live Likes: ${(post.likes || 0).toLocaleString()} | Live Comments: ${(post.comments || 0).toLocaleString()} | ER: ${post.engagement_rate}%\nSummary: ${post.video_summary_text}`,
+                                    `summary-${post.id}`
+                                  )
+                                }
+                                className="px-2.5 py-1 rounded-lg bg-white border border-[#19154E] text-[11px] font-bold text-[#19154E] hover:bg-[#EDE9FE] inline-flex items-center gap-1"
+                              >
+                                {copiedField === `summary-${post.id}` ? (
+                                  <>
+                                    <Check className="w-3 h-3 text-emerald-700" />
+                                    <span>Copied!</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <Copy className="w-3 h-3" />
+                                    <span>Copy Summary</span>
+                                  </>
+                                )}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const customP = `Analyze this live ${pMeta.name} post "${post.title}" (${(post.views || 0).toLocaleString()} live views, ${(post.likes || 0).toLocaleString()} likes, ${(post.comments || 0).toLocaleString()} comments, ${post.engagement_rate}% engagement rate): ${post.video_summary_text} — Why did it perform this way and how can I replicate or repurpose it across my other platforms for my US audience?`;
+                                  setActiveTab('strategy');
+                                  handleRunOpenClaw(customP);
+                                }}
+                                className="px-2.5 py-1 rounded-lg bg-[#19154E] text-[#FFF8FC] text-[11px] font-bold hover:bg-[#6D28D9] inline-flex items-center gap-1"
+                              >
+                                <span>🦞 Send to OpenClaw Agent</span>
+                              </button>
+                            </div>
+                          </div>
+                          <p className="text-xs text-[#19154E] font-medium leading-relaxed">
+                            {post.video_summary_text}
+                          </p>
+                          <div className="pt-1 flex flex-wrap items-center gap-4 text-[11px] font-bold text-neutral-600">
+                            <span>👁️ Views: {(post.views || 0).toLocaleString()}</span>
+                            <span>❤️ Likes: {(post.likes || 0).toLocaleString()}</span>
+                            <span>💬 Comments: {(post.comments || 0).toLocaleString()}</span>
+                            {typeof post.saves === 'number' && (
+                              <span>📌 Saves: {post.saves.toLocaleString()}</span>
+                            )}
+                            {typeof post.shares === 'number' && (
+                              <span>🔁 Shares: {post.shares.toLocaleString()}</span>
+                            )}
+                            {post.PostingHour && <span>🕒 Posted: {post.PostingHour}</span>}
+                            <span>⚡ Eng. Rate: {post.engagement_rate}%</span>
+                          </div>
                         </div>
                       </div>
-                      <p className="text-xs text-[#19154E] font-medium leading-relaxed">
-                        {post.video_summary_text}
-                      </p>
-                      <div className="pt-1 flex flex-wrap items-center gap-4 text-[11px] font-bold text-neutral-600">
-                        <span>👁️ Views: {(post.views || 0).toLocaleString()}</span>
-                        <span>❤️ Likes: {(post.likes || 0).toLocaleString()}</span>
-                        <span>💬 Comments: {(post.comments || 0).toLocaleString()}</span>
-                        {typeof post.saves === 'number' && (
-                          <span>📌 Saves: {post.saves.toLocaleString()}</span>
-                        )}
-                        {typeof post.shares === 'number' && (
-                          <span>🔁 Shares: {post.shares.toLocaleString()}</span>
-                        )}
-                        {post.PostingHour && <span>🕒 Posted: {post.PostingHour}</span>}
-                        <span>⚡ Eng. Rate: {post.engagement_rate}%</span>
-                      </div>
-                    </div>
-                  </div>
-                ))}
+                    );
+                  })
+                )}
               </div>
             </div>
 
@@ -3263,10 +3838,11 @@ export default function App() {
         )}
 
         {/* ============================================================
-            TAB 4: 1-STEP INSTAGRAM LINK + REDIRECT LOGIN
+            TAB 4: MULTI-PLATFORM 1-BUTTON CONNECT & REDIRECT HUB
+            (Instagram, TikTok, YouTube, Facebook, X, Threads)
         ============================================================ */}
         {activeTab === 'connect' && (
-          <div className="max-w-3xl mx-auto space-y-6 panel-enter">
+          <div className="max-w-4xl mx-auto space-y-6 panel-enter">
             <div className="editorial-card p-6 sm:p-8 bg-white space-y-6">
               <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-center border-b-2 border-[#19154E] pb-5">
                 <div className="md:col-span-8 space-y-2">
@@ -3275,6 +3851,9 @@ export default function App() {
                       <ShieldCheck className="w-4 h-4" />
                       <span>Isolated Workspace</span>
                     </span>
+                    <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#EDE9FE] border-2 border-[#19154E] text-xs font-bold text-[#6D28D9]">
+                      <span>{connectedPlatformIds.length} of 6 Platforms Connected</span>
+                    </span>
                     {currentUserEmail && (
                       <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#F5EEFF] border-2 border-[#19154E] text-xs font-bold">
                         <span>{currentUserEmail}</span>
@@ -3282,20 +3861,76 @@ export default function App() {
                     )}
                   </div>
                   <h3 className="font-display text-2xl sm:text-3xl font-bold text-[#19154E]">
-                    {profile.username
-                      ? `Connected to @${profile.username}`
-                      : 'Connect Your Instagram Account'}
+                    Connect Your Social Accounts
                   </h3>
                   <p className="text-xs sm:text-sm text-neutral-700 font-medium">
-                    Enter your Instagram <strong>@handle</strong> or profile link below and click{' '}
-                    <strong>Connect to Instagram</strong> to sign in on Instagram and pull your live
-                    followers, posts, and Reel stats into your private workspace.
+                    Choose a platform below — <strong>Instagram</strong>, <strong>TikTok</strong>,{' '}
+                    <strong>YouTube</strong>, <strong>Facebook</strong>, <strong>X</strong>, or{' '}
+                    <strong>Threads</strong> — enter your <strong>@handle</strong> or profile URL,
+                    and click the single button to sign in and pull your live stats.
                   </p>
                 </div>
                 <div className="md:col-span-4 flex justify-center">
                   <div className="w-48 h-32">
-                    <PlugMechanicCharacter connected={Boolean(profile.username)} />
+                    <PlugMechanicCharacter connected={connectedPlatformIds.length > 0} />
                   </div>
+                </div>
+              </div>
+
+              {/* 6-Platform Selector Grid */}
+              <div className="space-y-2.5">
+                <div className="text-xs font-extrabold uppercase tracking-wider text-neutral-600">
+                  1. Select Platform to Connect or Manage
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                  {PLATFORMS.map((plat) => {
+                    const conn = connectionsMap[plat.id];
+                    const isSelected = connectPlatform === plat.id;
+                    return (
+                      <button
+                        key={plat.id}
+                        type="button"
+                        data-testid={`select-platform-${plat.id}`}
+                        onClick={() => handleSelectConnectPlatform(plat.id)}
+                        className={`p-3.5 rounded-2xl border-2 border-[#19154E] text-left transition-all duration-150 flex items-center justify-between gap-2 ${
+                          isSelected
+                            ? 'bg-[#FFFDF9] shadow-[4px_4px_0px_#19154E] -translate-y-0.5 ring-2 ring-[#FF7EB6]'
+                            : conn?.handle
+                            ? 'bg-[#F5EEFF]/60 hover:bg-white'
+                            : 'bg-white hover:bg-[#FFF8FC]'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <span
+                            className="w-9 h-9 rounded-xl border-2 border-[#19154E] flex items-center justify-center shrink-0"
+                            style={{
+                              backgroundColor: plat.badgeBg,
+                              color: plat.badgeText,
+                            }}
+                          >
+                            <PlatformIcon platform={plat.id} className="w-4 h-4" />
+                          </span>
+                          <div className="min-w-0">
+                            <div className="font-display font-bold text-sm text-[#19154E] truncate">
+                              {plat.name}
+                            </div>
+                            <div
+                              className={`text-[11px] font-bold truncate ${
+                                conn?.handle ? 'text-emerald-700 font-mono-code' : 'text-neutral-500'
+                              }`}
+                            >
+                              {conn?.handle ? `● @${conn.handle}` : 'Not connected'}
+                            </div>
+                          </div>
+                        </div>
+                        {isSelected && (
+                          <span className="text-[10px] font-extrabold px-2 py-0.5 rounded-md bg-[#C8F904] border border-[#19154E] text-[#19154E] shrink-0">
+                            Selected
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
 
@@ -3311,27 +3946,43 @@ export default function App() {
                 </div>
               )}
 
-              {/* Single Unified Connect & Redirect Form */}
+              {/* Single Unified Connect & Redirect Form for Selected Platform */}
               <form onSubmit={handleConnectAndRedirect} className="space-y-4">
                 <div className="p-5 rounded-2xl bg-[#FFF8FC] border-2 border-[#19154E] space-y-3">
-                  <label className="block text-sm font-display font-bold text-[#19154E]">
-                    Instagram Profile Link or @Username
-                  </label>
+                  <div className="flex items-center justify-between gap-2">
+                    <label className="text-sm font-display font-bold text-[#19154E] flex items-center gap-2">
+                      <span
+                        className="w-6 h-6 rounded-lg border border-[#19154E] inline-flex items-center justify-center"
+                        style={{
+                          backgroundColor: connectMeta.badgeBg,
+                          color: connectMeta.badgeText,
+                        }}
+                      >
+                        <PlatformIcon platform={connectMeta.id} className="w-3.5 h-3.5" />
+                      </span>
+                      <span>2. {connectMeta.name} Profile Link or @Handle</span>
+                    </label>
+                    {connectionsMap[connectMeta.id]?.handle && (
+                      <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-[#C8F904] border border-[#19154E] text-[#19154E]">
+                        Connected: @{connectionsMap[connectMeta.id].handle}
+                      </span>
+                    )}
+                  </div>
                   <input
                     type="text"
                     required
-                    data-testid="ig-handle-input"
+                    data-testid="platform-handle-input"
                     value={handleInput}
                     onChange={(e) => setHandleInput(e.target.value)}
-                    placeholder="https://www.instagram.com/your_handle/ or @your_handle"
+                    placeholder={connectMeta.placeholder}
                     className="w-full px-4 py-3 rounded-xl bg-white border-2 border-[#19154E] text-sm font-bold text-[#19154E] focus:outline-none"
                   />
                   <p className="text-xs text-neutral-600 font-medium">
-                    Detected account:{' '}
+                    Detected {connectMeta.name} account:{' '}
                     <strong className="font-mono-code text-[#6D28D9]">
-                      {extractHandleFromLink(handleInput)
-                        ? `@${extractHandleFromLink(handleInput)}`
-                        : 'Enter your Instagram handle above'}
+                      {extractHandleForPlatform(handleInput)
+                        ? `@${extractHandleForPlatform(handleInput)}`
+                        : `Enter your ${connectMeta.name} handle above`}
                     </strong>
                   </p>
                 </div>
@@ -3339,30 +3990,43 @@ export default function App() {
                 <button
                   type="submit"
                   disabled={syncing}
-                  data-testid="single-connect-ig-btn"
+                  data-testid="single-connect-btn"
                   className="w-full editorial-btn py-4 px-6 rounded-2xl bg-[#C8F904] text-[#19154E] font-display font-bold text-sm sm:text-base flex items-center justify-center gap-2.5"
                 >
                   {syncing ? (
                     <>
                       <RefreshCw className="w-5 h-5 animate-spin" />
-                      <span>Connecting to Instagram &amp; Pulling Live Stats...</span>
+                      <span>
+                        Connecting to {connectMeta.name} &amp; Pulling Live Stats...
+                      </span>
                     </>
                   ) : (
                     <>
-                      <Instagram className="w-5 h-5" />
-                      <span>Connect to Instagram &amp; Pull Stats ↗</span>
+                      <PlatformIcon platform={connectMeta.id} className="w-5 h-5" />
+                      <span>Connect to {connectMeta.name} &amp; Pull Stats ↗</span>
                     </>
                   )}
                 </button>
 
-                {profile.username && (
-                  <div className="pt-1 flex justify-end">
+                {connectionsMap[connectMeta.id]?.handle && (
+                  <div className="pt-1 flex items-center justify-between gap-3">
                     <button
                       type="button"
-                      onClick={handleDisconnectInstagram}
+                      onClick={() => {
+                        setSelectedPlatform(connectMeta.id);
+                        setActiveTab('analytics');
+                      }}
+                      className="text-xs font-bold text-[#6D28D9] hover:underline"
+                    >
+                      View @{connectionsMap[connectMeta.id].handle} {connectMeta.name} Stats →
+                    </button>
+                    <button
+                      type="button"
+                      data-testid={`disconnect-platform-${connectMeta.id}`}
+                      onClick={() => handleDisconnectPlatform(connectMeta.id)}
                       className="text-xs font-bold text-neutral-500 hover:text-rose-600 underline"
                     >
-                      Disconnect @{profile.username} from your workspace
+                      Disconnect @{connectionsMap[connectMeta.id].handle} ({connectMeta.name})
                     </button>
                   </div>
                 )}
@@ -3371,52 +4035,57 @@ export default function App() {
               {/* Optional Collapsed Advanced Section (Hidden by Default) */}
               <details className="pt-2 border-t border-neutral-200 text-xs">
                 <summary className="cursor-pointer font-bold text-neutral-500 hover:text-[#19154E] select-none py-1">
-                  ⚙️ Advanced Meta Webhook / API Token Settings (Optional)
+                  ⚙️ Advanced {connectMeta.name} API Token Settings (Optional)
                 </summary>
-                <form onSubmit={handleConnectSubmit} className="mt-4 space-y-4 p-4 rounded-2xl bg-[#F5EEFF] border-2 border-[#19154E]">
+                <form
+                  onSubmit={handleConnectSubmit}
+                  className="mt-4 space-y-4 p-4 rounded-2xl bg-[#F5EEFF] border-2 border-[#19154E]"
+                >
                   <div>
                     <label className="block text-xs font-bold text-[#19154E] mb-1">
-                      Optional Meta Graph Access Token
+                      {connectMeta.tokenLabel}
                     </label>
                     <input
                       type="password"
                       value={tokenInput}
                       onChange={(e) => setTokenInput(e.target.value)}
-                      placeholder="IGQWR... or EAA..."
+                      placeholder={connectMeta.tokenPlaceholder}
                       className="w-full px-3.5 py-2 rounded-xl bg-white border-2 border-[#19154E] text-xs font-mono-code"
                     />
                   </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <div>
-                      <label className="block text-xs font-bold text-[#19154E] mb-1">
-                        Optional Meta App ID
-                      </label>
-                      <input
-                        type="text"
-                        value={appIdInput}
-                        onChange={(e) => setAppIdInput(e.target.value)}
-                        placeholder="App ID"
-                        className="w-full px-3 py-2 rounded-xl bg-white border-2 border-[#19154E] text-xs font-mono-code"
-                      />
+                  {connectMeta.id === 'instagram' && (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-xs font-bold text-[#19154E] mb-1">
+                          Optional Meta App ID
+                        </label>
+                        <input
+                          type="text"
+                          value={appIdInput}
+                          onChange={(e) => setAppIdInput(e.target.value)}
+                          placeholder="App ID"
+                          className="w-full px-3 py-2 rounded-xl bg-white border-2 border-[#19154E] text-xs font-mono-code"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-bold text-[#19154E] mb-1">
+                          Optional Meta App Secret
+                        </label>
+                        <input
+                          type="password"
+                          value={appSecretInput}
+                          onChange={(e) => setAppSecretInput(e.target.value)}
+                          placeholder="App Secret"
+                          className="w-full px-3 py-2 rounded-xl bg-white border-2 border-[#19154E] text-xs font-mono-code"
+                        />
+                      </div>
                     </div>
-                    <div>
-                      <label className="block text-xs font-bold text-[#19154E] mb-1">
-                        Optional Meta App Secret
-                      </label>
-                      <input
-                        type="password"
-                        value={appSecretInput}
-                        onChange={(e) => setAppSecretInput(e.target.value)}
-                        placeholder="App Secret"
-                        className="w-full px-3 py-2 rounded-xl bg-white border-2 border-[#19154E] text-xs font-mono-code"
-                      />
-                    </div>
-                  </div>
+                  )}
                   <button
                     type="submit"
                     className="editorial-btn px-4 py-2 rounded-xl bg-[#19154E] text-white text-xs font-bold"
                   >
-                    Save Advanced API Settings
+                    Save {connectMeta.name} API Token
                   </button>
                 </form>
               </details>

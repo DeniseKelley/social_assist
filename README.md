@@ -1,11 +1,11 @@
-# SocialAssist — Creator Instagram Automated DM & Strategy Studio
+# SocialAssist — Omnichannel Automated DM & Live Strategy Studio
 
-A ManyChat-style Instagram Automated DM studio + Instagram Analytics & AI Strategy engine built with **Python (FastAPI)** and **React (Vite + Tailwind CSS)**.
+A ManyChat-style Multi-Platform Automated Reply/DM studio + Live Creator Analytics & AI Strategy engine built with **Python (FastAPI)**, **Vercel Serverless Functions**, and **React (Vite + Tailwind CSS)**.
 
 ## Features
-- **ManyChat-Style Automated DM Studio**: Comment-to-DM keyword flows, Story Reply triggers, Direct DM keyword auto-replies, public comment auto-replies, and a live mobile DM simulator.
-- **1-Step Instagram Connection**: Connect your Instagram account and pull live profile & Reel metrics into your isolated workspace.
-- **Instagram Statistics & AI Strategy Engine**: Tracks engagement rates, save-to-view ratios, comment lift multiplier, and generates actionable content & DM trigger strategies.
+- **6-Platform 1-Button Connect Hub**: Connect **Instagram**, **TikTok**, **YouTube**, **Facebook**, **X**, and **Threads** with a single button that redirects to sign in and pulls live audience & post metrics into your isolated workspace.
+- **ManyChat-Style Automated Reply & DM Studio**: Comment-to-DM keyword flows, Story Reply triggers, Direct DM keyword auto-replies, per-platform or omnichannel targeting, and a live interactive simulator.
+- **Omnichannel Statistics & OpenClaw Strategy Engine**: Switch between individual platforms or an **`All Platforms`** combined overview tracking followers/subscribers, views, likes, engagement rates, US scroll windows, and AI growth strategies.
 
 ## Quick Start
 

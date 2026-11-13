@@ -1083,23 +1083,256 @@ async def handle_instagram_webhook(request: Request):
 
 
 # ---------------------------------------------------------------------------
-# API Endpoints: Instagram Analytics & Strategy Engine
+# API Endpoints: Multi-Platform Analytics & Strategy Engine
+# (Instagram, TikTok, YouTube, Facebook, X, Threads)
 # ---------------------------------------------------------------------------
 
+def _parse_compact_count(raw: str) -> int:
+    import re
+    m = re.search(r"([0-9][0-9.,]*)\s*([KMBkmb])?", str(raw or ""))
+    if not m:
+        return 0
+    num = float(m.group(1).replace(",", ""))
+    mult = {"K": 1_000, "M": 1_000_000, "B": 1_000_000_000}.get((m.group(2) or "").upper(), 1)
+    return int(round(num * mult))
+
+
+async def fetch_other_platform_public(platform: str, handle: str) -> Optional[Dict[str, Any]]:
+    import re
+    import xml.etree.ElementTree as ET
+
+    clean_h = (handle or "").lstrip("@").strip()
+    if not clean_h:
+        return None
+
+    async with httpx.AsyncClient(timeout=14.0, follow_redirects=True) as client:
+        if platform == "tiktok":
+            r = await client.get(
+                f"https://www.tiktok.com/embed/@{clean_h}",
+                headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) Chrome/124.0.0.0 Safari/537.36"},
+            )
+            if r.status_code != 200:
+                return None
+            m = re.search(r'<script id="__FRONTITY_CONNECT_STATE__"[^>]*>([\s\S]*?)</script>', r.text)
+            if not m:
+                return None
+            state = json.loads(m.group(1))
+            ud = (((state.get("source") or {}).get("data") or {}).get(f"/embed/@{clean_h}") or {})
+            pd = ud.get("pageData") or {}
+            ui = pd.get("userInfo") or {}
+            vlist = pd.get("videoList") or []
+            if not ui.get("uniqueId") and not vlist:
+                return None
+            posts = []
+            for v in vlist[:12]:
+                vid = str(v.get("id") or "")
+                views = int(v.get("playCount") or 0)
+                likes = int(v.get("diggCount") or 0)
+                comments = int(v.get("commentCount") or 0)
+                desc = str(v.get("desc") or f"TikTok by @{clean_h}")
+                er = round(((likes + comments) / max(views, 1)) * 100, 2) if views > 0 else 0.0
+                posts.append(
+                    {
+                        "id": vid,
+                        "shortcode": vid,
+                        "platform": "tiktok",
+                        "title": desc.splitlines()[0][:72] or "TikTok Video",
+                        "type": "VIDEO",
+                        "published_label": "TikTok",
+                        "thumbnail_url": v.get("coverUrl") or "",
+                        "fallback_thumbnail_url": "",
+                        "caption": desc,
+                        "permalink": f"https://www.tiktok.com/@{clean_h}/video/{vid}",
+                        "likes": likes,
+                        "comments": comments,
+                        "views": views,
+                        "engagement_rate": er,
+                        "video_summary_text": f"CAPTION: {desc[:160]} | LIVE TIKTOK METRICS: {views:,} views.",
+                    }
+                )
+            return {
+                "source": "live_tiktok_public",
+                "profile": {
+                    "platform": "tiktok",
+                    "username": ui.get("uniqueId") or clean_h,
+                    "name": ui.get("nickname") or clean_h,
+                    "followers_count": int(ui.get("followerCount") or 0),
+                    "follows_count": int(ui.get("followingCount") or 0),
+                    "media_count": len(posts),
+                    "biography": ui.get("signature") or "",
+                    "profile_picture_url": ui.get("avatarThumbUrl") or "",
+                },
+                "posts": posts,
+            }
+
+        if platform == "youtube":
+            r = await client.get(
+                f"https://www.youtube.com/@{clean_h}/videos",
+                headers={
+                    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) Chrome/124.0.0.0 Safari/537.36",
+                    "Cookie": "CONSENT=YES+cb.20210328-17-p0.en+FX+419;",
+                },
+            )
+            if r.status_code != 200:
+                return None
+            cid_m = re.search(r'"externalId":"(UC[A-Za-z0-9_-]{20,})"', r.text)
+            sub_m = re.search(r'"([0-9.,]+\s*[KMBkmb]?)\s+subscribers"', r.text)
+            vid_m = re.search(r'"([0-9.,]+\s*[KMBkmb]?)\s+videos"', r.text)
+            channel_id = cid_m.group(1) if cid_m else ""
+            subs = _parse_compact_count(sub_m.group(1)) if sub_m else 0
+            media_cnt = _parse_compact_count(vid_m.group(1)) if vid_m else 0
+            posts = []
+            if channel_id:
+                feed_r = await client.get(f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}")
+                if feed_r.status_code == 200:
+                    ns = {
+                        "atom": "http://www.w3.org/2005/Atom",
+                        "yt": "http://www.youtube.com/xml/schemas/2015",
+                        "media": "http://search.yahoo.com/mrss/",
+                    }
+                    root = ET.fromstring(feed_r.text)
+                    for entry in root.findall("atom:entry", ns)[:12]:
+                        vid = entry.findtext("yt:videoId", default="", namespaces=ns)
+                        title = entry.findtext("atom:title", default="YouTube Video", namespaces=ns)
+                        mg = entry.find("media:group", ns)
+                        comm = mg.find("media:community", ns) if mg is not None else None
+                        st = comm.find("media:statistics", ns) if comm is not None else None
+                        sr = comm.find("media:starRating", ns) if comm is not None else None
+                        th = mg.find("media:thumbnail", ns) if mg is not None else None
+                        desc = mg.findtext("media:description", default="", namespaces=ns) if mg is not None else ""
+                        views = int(st.attrib.get("views", 0)) if st is not None else 0
+                        likes = int(sr.attrib.get("count", 0)) if sr is not None else 0
+                        er = round((likes / max(views, 1)) * 100, 2) if views > 0 else 0.0
+                        posts.append(
+                            {
+                                "id": vid,
+                                "shortcode": vid,
+                                "platform": "youtube",
+                                "title": title[:72],
+                                "type": "VIDEO",
+                                "published_label": "YouTube",
+                                "thumbnail_url": th.attrib.get("url", "") if th is not None else "",
+                                "fallback_thumbnail_url": "",
+                                "caption": desc[:320] or title,
+                                "permalink": f"https://www.youtube.com/watch?v={vid}",
+                                "likes": likes,
+                                "comments": 0,
+                                "views": views,
+                                "engagement_rate": er,
+                                "video_summary_text": f"TITLE: {title} | LIVE YOUTUBE METRICS: {views:,} views, {likes:,} likes ({er}% ER).",
+                            }
+                        )
+            return {
+                "source": "live_youtube_public",
+                "profile": {
+                    "platform": "youtube",
+                    "username": clean_h,
+                    "name": clean_h,
+                    "followers_count": subs,
+                    "follows_count": 0,
+                    "media_count": media_cnt or len(posts),
+                    "biography": "",
+                    "profile_picture_url": "",
+                },
+                "posts": posts,
+            }
+
+        if platform == "x":
+            r = await client.get(
+                f"https://api.fxtwitter.com/{clean_h}",
+                headers={"User-Agent": "SocialAssist/2.0"},
+            )
+            if r.status_code != 200:
+                return None
+            u = (r.json() or {}).get("user") or {}
+            if not u:
+                return None
+            return {
+                "source": "live_x_public",
+                "profile": {
+                    "platform": "x",
+                    "username": u.get("screen_name") or clean_h,
+                    "name": u.get("name") or clean_h,
+                    "followers_count": int(u.get("followers") or 0),
+                    "follows_count": int(u.get("following") or 0),
+                    "media_count": int(u.get("tweets") or 0),
+                    "biography": u.get("description") or "",
+                    "profile_picture_url": u.get("avatar_url") or "",
+                },
+                "posts": [],
+            }
+
+        if platform in ("facebook", "threads"):
+            target_url = (
+                f"https://www.facebook.com/{clean_h}"
+                if platform == "facebook"
+                else f"https://www.threads.net/@{clean_h}"
+            )
+            r = await client.get(
+                target_url,
+                headers={"User-Agent": "Mozilla/5.0 (compatible; Discordbot/2.0; +https://discordapp.com)"},
+            )
+            if r.status_code != 200:
+                return None
+            desc_m = re.search(r'<meta[^>]+property="og:description"[^>]+content="([^"]*)"', r.text)
+            title_m = re.search(r'<meta[^>]+property="og:title"[^>]+content="([^"]*)"', r.text)
+            desc = desc_m.group(1) if desc_m else ""
+            title = title_m.group(1) if title_m else clean_h
+            fol_m = re.search(r"([0-9.,]+\s*[KMBkmb]?)\s*(?:Followers|followers|likes)", desc)
+            thr_m = re.search(r"([0-9.,]+\s*[KMBkmb]?)\s*(?:Threads|threads)", desc)
+            return {
+                "source": f"live_{platform}_public",
+                "profile": {
+                    "platform": platform,
+                    "username": clean_h,
+                    "name": title.split("(")[0].strip() or clean_h,
+                    "followers_count": _parse_compact_count(fol_m.group(1)) if fol_m else 0,
+                    "follows_count": 0,
+                    "media_count": _parse_compact_count(thr_m.group(1)) if thr_m else 0,
+                    "biography": desc,
+                    "profile_picture_url": "",
+                },
+                "posts": [],
+            }
+    return None
+
+
 @app.get("/api/analytics")
-async def get_instagram_analytics(refresh: bool = False, handle: Optional[str] = None):
+async def get_instagram_analytics(
+    refresh: bool = False,
+    handle: Optional[str] = None,
+    platform: str = "instagram",
+):
+    plat = (platform or "instagram").lower().strip()
+    if plat == "twitter":
+        plat = "x"
     cfg = get_config()
-    target_handle = (handle or cfg.get("instagram_handle", "")).lstrip("@").strip()
+    target_handle = (handle or (cfg.get("instagram_handle", "") if plat == "instagram" else "")).lstrip("@").strip()
     fetched_at = datetime.now(timezone.utc).isoformat()
 
-    if not target_handle and not cfg.get("access_token"):
-        raise HTTPException(status_code=400, detail="Please provide an Instagram @handle to sync.")
+    if not target_handle and not (plat == "instagram" and cfg.get("access_token")):
+        raise HTTPException(status_code=400, detail=f"Please provide a {plat} @handle to sync.")
+
+    if plat != "instagram":
+        other = await fetch_other_platform_public(plat, target_handle)
+        if other:
+            analysis = compute_strategies_from_posts(other["profile"], other["posts"])
+            return {
+                "platform": plat,
+                "source": other["source"],
+                "fetched_at": fetched_at,
+                "profile": other["profile"],
+                "posts": other["posts"],
+                "analysis": analysis,
+            }
+        raise HTTPException(status_code=502, detail=f"Could not fetch live metrics from {plat} for @{target_handle}.")
 
     if cfg.get("access_token") and (not handle or target_handle.lower() == (cfg.get("instagram_handle") or "").lower()):
         live_data = await fetch_graph_media_and_insights(cfg)
         if live_data and live_data.get("posts"):
             analysis = compute_strategies_from_posts(live_data["profile"], live_data["posts"])
             return {
+                "platform": "instagram",
                 "source": "instagram_graph_api",
                 "fetched_at": fetched_at,
                 "profile": live_data["profile"],
@@ -1111,6 +1344,7 @@ async def get_instagram_analytics(refresh: bool = False, handle: Optional[str] =
     if pub:
         analysis = compute_strategies_from_posts(pub["profile"], pub["posts"])
         return {
+            "platform": "instagram",
             "source": pub.get("source", "live_instagram_public"),
             "fetched_at": fetched_at,
             "profile": pub["profile"],
@@ -1130,11 +1364,12 @@ class OpenClawAnalyzeRequest(BaseModel):
     gateway_url: Optional[str] = "http://localhost:18789/v1/chat/completions"
     api_key: Optional[str] = ""
     handle: Optional[str] = None
+    platform: Optional[str] = "instagram"
 
 
 @app.get("/api/openclaw/brief")
-async def get_openclaw_brief(handle: Optional[str] = None):
-    analytics = await get_instagram_analytics(refresh=False, handle=handle)
+async def get_openclaw_brief(handle: Optional[str] = None, platform: str = "instagram"):
+    analytics = await get_instagram_analytics(refresh=False, handle=handle, platform=platform)
     analysis = analytics["analysis"]
     return {
         "status": "ok",
@@ -1216,7 +1451,11 @@ Across your **{len(posts)} live-synced Reels** (**{total_views:,} views** · **{
 
 @app.post("/api/openclaw/analyze")
 async def run_openclaw_analysis(req: OpenClawAnalyzeRequest):
-    analytics = await get_instagram_analytics(refresh=False, handle=req.handle)
+    analytics = await get_instagram_analytics(
+        refresh=False,
+        handle=req.handle,
+        platform=req.platform or "instagram",
+    )
     profile = analytics["profile"]
     posts = analytics["posts"]
     analysis = analytics["analysis"]
@@ -1273,4 +1512,295 @@ async def run_openclaw_analysis(req: OpenClawAnalyzeRequest):
         "gateway_url": gw_url,
         "agent_response": agent_output,
         "brief_used": brief,
+    }
+
+
+# ---------------------------------------------------------------------------
+# API Endpoints: Multi-Platform Content Planning Calendar & Cross-Publisher
+# ---------------------------------------------------------------------------
+
+SCHEDULED_POSTS_PATH = DATA_DIR / "scheduled_posts.json"
+
+
+class ScheduledPostPayload(BaseModel):
+    id: Optional[str] = None
+    title: Optional[str] = ""
+    caption: str = ""
+    captions: Dict[str, str] = {}
+    format: str = "video"  # 'video' | 'carousel' | 'image' | 'text'
+    platforms: List[str] = ["instagram"]
+    media_urls: List[str] = []
+    scheduled_date: str = ""
+    scheduled_time: str = "18:00"
+    status: str = "scheduled"  # 'draft' | 'scheduled' | 'queued' | 'published' | 'failed'
+    first_comment: Optional[str] = ""
+    auto_dm_keyword: Optional[str] = ""
+    auto_dm_url: Optional[str] = ""
+
+
+class PublishDispatchRequest(BaseModel):
+    post: Dict[str, Any]
+    platform_tokens: Dict[str, Dict[str, Any]] = {}
+
+
+@app.get("/api/planner/posts")
+async def list_scheduled_posts():
+    posts = load_json(SCHEDULED_POSTS_PATH, [])
+    return {"posts": posts}
+
+
+@app.post("/api/planner/posts")
+async def save_scheduled_post(req: ScheduledPostPayload):
+    posts = load_json(SCHEDULED_POSTS_PATH, [])
+    now_iso = datetime.now(timezone.utc).isoformat()
+    post_id = req.id or f"post-{int(datetime.now().timestamp() * 1000)}"
+    record = {
+        "id": post_id,
+        "title": req.title or (req.caption.splitlines()[0][:64] if req.caption else "Untitled Post"),
+        "caption": req.caption,
+        "captions": req.captions,
+        "format": req.format,
+        "platforms": req.platforms,
+        "media_urls": req.media_urls,
+        "scheduled_date": req.scheduled_date,
+        "scheduled_time": req.scheduled_time,
+        "status": req.status,
+        "first_comment": req.first_comment or "",
+        "auto_dm_keyword": req.auto_dm_keyword or "",
+        "auto_dm_url": req.auto_dm_url or "",
+        "updated_at": now_iso,
+    }
+    existing_idx = next((i for i, p in enumerate(posts) if p.get("id") == post_id), -1)
+    if existing_idx >= 0:
+        record["created_at"] = posts[existing_idx].get("created_at", now_iso)
+        posts[existing_idx] = record
+    else:
+        record["created_at"] = now_iso
+        posts.insert(0, record)
+    save_json(SCHEDULED_POSTS_PATH, posts)
+    return record
+
+
+@app.delete("/api/planner/posts/{post_id}")
+async def delete_scheduled_post(post_id: str):
+    posts = load_json(SCHEDULED_POSTS_PATH, [])
+    updated = [p for p in posts if p.get("id") != post_id]
+    save_json(SCHEDULED_POSTS_PATH, updated)
+    return {"deleted": post_id}
+
+
+async def _dispatch_single_platform(
+    platform_id: str,
+    post: Dict[str, Any],
+    token_cfg: Dict[str, Any],
+    fallback_ig_cfg: Dict[str, Any],
+) -> Dict[str, Any]:
+    key = platform_id.lower().strip()
+    token = (token_cfg.get("access_token") or "").strip()
+    account_id = (token_cfg.get("account_id") or "").strip()
+    if key == "instagram" and not token:
+        token = (fallback_ig_cfg.get("access_token") or "").strip()
+        account_id = account_id or (fallback_ig_cfg.get("account_id") or "").strip()
+
+    captions_map = post.get("captions") or {}
+    caption = captions_map.get(key) or post.get("caption") or ""
+    public_urls = [
+        u for u in (post.get("media_urls") or []) if isinstance(u, str) and u.startswith(("http://", "https://"))
+    ]
+    fmt = post.get("format", "video")
+
+    if not token:
+        return {
+            "platform": key,
+            "mode": "queued_preview",
+            "status": "queued",
+            "message": f"Queued in Safe Preview Mode (connect {key.title()} API token for live auto-push).",
+        }
+
+    async with httpx.AsyncClient(timeout=25.0) as client:
+        if key == "instagram":
+            if not public_urls:
+                return {
+                    "platform": "instagram",
+                    "mode": "queued_preview",
+                    "status": "queued",
+                    "message": "Instagram token verified — add a public https:// media URL for Graph container pull.",
+                }
+            api_base = "https://graph.instagram.com/v21.0"
+            if not account_id:
+                me_r = await client.get(f"{api_base}/me", params={"fields": "id,user_id", "access_token": token})
+                if me_r.status_code == 200:
+                    me_d = me_r.json()
+                    account_id = me_d.get("user_id") or me_d.get("id") or ""
+            if not account_id:
+                return {
+                    "platform": "instagram",
+                    "mode": "live_error",
+                    "status": "failed",
+                    "message": "Could not resolve Instagram Account ID from token.",
+                }
+
+            if fmt == "carousel" and len(public_urls) > 1:
+                child_ids: List[str] = []
+                for url in public_urls[:10]:
+                    is_vid = url.lower().split("?")[0].endswith((".mp4", ".mov", ".m4v"))
+                    c_payload = (
+                        {"media_type": "VIDEO", "video_url": url, "is_carousel_item": True, "access_token": token}
+                        if is_vid
+                        else {"image_url": url, "is_carousel_item": True, "access_token": token}
+                    )
+                    cr = await client.post(f"{api_base}/{account_id}/media", json=c_payload)
+                    cd = cr.json()
+                    if cr.status_code != 200 or not cd.get("id"):
+                        return {
+                            "platform": "instagram",
+                            "mode": "live_error",
+                            "status": "failed",
+                            "message": (cd.get("error") or {}).get("message", "Carousel item container failed."),
+                        }
+                    child_ids.append(cd["id"])
+                pr = await client.post(
+                    f"{api_base}/{account_id}/media",
+                    json={
+                        "media_type": "CAROUSEL",
+                        "children": ",".join(child_ids),
+                        "caption": caption,
+                        "access_token": token,
+                    },
+                )
+                pd = pr.json()
+                creation_id = pd.get("id")
+            else:
+                first_url = public_urls[0]
+                is_vid = fmt == "video" or first_url.lower().split("?")[0].endswith((".mp4", ".mov", ".m4v"))
+                c_payload = (
+                    {
+                        "media_type": "REELS",
+                        "video_url": first_url,
+                        "caption": caption,
+                        "share_to_feed": True,
+                        "access_token": token,
+                    }
+                    if is_vid
+                    else {"image_url": first_url, "caption": caption, "access_token": token}
+                )
+                cr = await client.post(f"{api_base}/{account_id}/media", json=c_payload)
+                cd = cr.json()
+                creation_id = cd.get("id")
+                if not creation_id:
+                    return {
+                        "platform": "instagram",
+                        "mode": "live_error",
+                        "status": "failed",
+                        "message": (cd.get("error") or {}).get("message", "Instagram container creation failed."),
+                    }
+
+            pub_r = await client.post(
+                f"{api_base}/{account_id}/media_publish",
+                json={"creation_id": creation_id, "access_token": token},
+            )
+            pub_d = pub_r.json()
+            if pub_r.status_code == 200 and pub_d.get("id"):
+                return {
+                    "platform": "instagram",
+                    "mode": "live_published",
+                    "status": "published",
+                    "external_id": pub_d["id"],
+                    "message": f"Published live to Instagram (ID: {pub_d['id']})!",
+                }
+            return {
+                "platform": "instagram",
+                "mode": "live_error",
+                "status": "failed",
+                "message": (pub_d.get("error") or {}).get("message", "Instagram media_publish failed."),
+            }
+
+        if key == "x":
+            xr = await client.post(
+                "https://api.x.com/2/tweets",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"text": caption[:280]},
+            )
+            xd = xr.json() if xr.headers.get("content-type", "").startswith("application/json") else {}
+            if xr.status_code in (200, 201) and (xd.get("data") or {}).get("id"):
+                tid = xd["data"]["id"]
+                return {
+                    "platform": "x",
+                    "mode": "live_published",
+                    "status": "published",
+                    "external_id": tid,
+                    "message": f"Published live on X (Tweet ID: {tid})!",
+                }
+            return {
+                "platform": "x",
+                "mode": "live_error",
+                "status": "failed",
+                "message": xd.get("detail") or "X API rejected tweet.",
+            }
+
+        if key == "threads":
+            first_url = public_urls[0] if public_urls else ""
+            is_vid = bool(first_url) and (fmt == "video" or first_url.lower().endswith((".mp4", ".mov")))
+            t_payload = (
+                {"media_type": "VIDEO", "video_url": first_url, "text": caption[:500], "access_token": token}
+                if is_vid
+                else {"media_type": "IMAGE", "image_url": first_url, "text": caption[:500], "access_token": token}
+                if first_url
+                else {"media_type": "TEXT", "text": caption[:500], "access_token": token}
+            )
+            tr = await client.post("https://graph.threads.net/v1.0/me/threads", json=t_payload)
+            td = tr.json()
+            if tr.status_code == 200 and td.get("id"):
+                pr = await client.post(
+                    "https://graph.threads.net/v1.0/me/threads_publish",
+                    json={"creation_id": td["id"], "access_token": token},
+                )
+                pd = pr.json()
+                if pr.status_code == 200 and pd.get("id"):
+                    return {
+                        "platform": "threads",
+                        "mode": "live_published",
+                        "status": "published",
+                        "external_id": pd["id"],
+                        "message": f"Published live to Threads (ID: {pd['id']})!",
+                    }
+            return {
+                "platform": "threads",
+                "mode": "live_error",
+                "status": "failed",
+                "message": (td.get("error") or {}).get("message", "Threads publish failed."),
+            }
+
+        return {
+            "platform": key,
+            "mode": "queued_preview",
+            "status": "queued",
+            "message": f"{key.title()} token saved — queued in Planner Studio.",
+        }
+
+
+@app.post("/api/publish")
+async def dispatch_multiplatform_publish(req: PublishDispatchRequest):
+    cfg = get_config()
+    platforms = req.post.get("platforms") or []
+    if not platforms:
+        raise HTTPException(status_code=400, detail="Select at least one platform.")
+
+    results = []
+    for p in platforms:
+        res = await _dispatch_single_platform(
+            str(p),
+            req.post,
+            (req.platform_tokens or {}).get(str(p).lower(), {}),
+            cfg,
+        )
+        results.append(res)
+
+    any_live = any(r["mode"] == "live_published" for r in results)
+    all_failed = all(r["mode"] == "live_error" for r in results)
+    return {
+        "ok": True,
+        "dispatched_at": datetime.now(timezone.utc).isoformat(),
+        "overall_status": "failed" if all_failed else ("published" if any_live else "queued"),
+        "results": results,
     }
