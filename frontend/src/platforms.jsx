@@ -27,11 +27,14 @@ export const PLATFORMS = [
     placeholder: 'https://www.tiktok.com/@your_handle or @your_handle',
     tokenLabel: 'Optional TikTok Developer Access Token',
     tokenPlaceholder: 'act.example...',
-    buildProfileUrl: (h) => `https://www.tiktok.com/@${encodeURIComponent(h)}`,
+    buildProfileUrl: (h) =>
+      /^https?:\/\//i.test(h) ? h : `https://www.tiktok.com/@${encodeURIComponent(h)}`,
     buildLoginUrl: (h) =>
-      `https://www.tiktok.com/login?redirect_url=${encodeURIComponent(
-        `https://www.tiktok.com/@${h}`
-      )}`,
+      /^https?:\/\//i.test(h)
+        ? 'https://www.tiktok.com/login'
+        : `https://www.tiktok.com/login?redirect_url=${encodeURIComponent(
+            `https://www.tiktok.com/@${h}`
+          )}`,
   },
   {
     id: 'youtube',
@@ -103,39 +106,152 @@ export const PLATFORMS = [
 
 export const PLATFORM_BY_ID = Object.fromEntries(PLATFORMS.map((p) => [p.id, p]));
 
+const RESERVED_SOCIAL_PATHS = new Set([
+  'p',
+  'reel',
+  'reels',
+  'stories',
+  'explore',
+  'accounts',
+  'watch',
+  'login',
+  'logout',
+  'signup',
+  'i',
+  'home',
+  'foryou',
+  'following',
+  'friends',
+  'messages',
+  'upload',
+  'tiktokstudio',
+  'creator-center',
+  'business',
+  'settings',
+  'search',
+  'tag',
+  'music',
+  'live',
+  'about',
+  'share',
+]);
+
+const KNOWN_SOCIAL_DOMAINS = [
+  'instagram.com',
+  'tiktok.com',
+  'youtube.com',
+  'youtu.be',
+  'facebook.com',
+  'fb.com',
+  'x.com',
+  'twitter.com',
+  'threads.net',
+];
+
+function isBareSocialDomain(host) {
+  const h = String(host || '')
+    .toLowerCase()
+    .replace(/^(www|m)\./, '');
+  return KNOWN_SOCIAL_DOMAINS.some((d) => h === d || h.endsWith(`.${d}`));
+}
+
+export function isShortTikTokShareUrl(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return false;
+  try {
+    const normalized = s.startsWith('http') ? s : `https://${s}`;
+    const u = new URL(normalized);
+    const h = u.hostname.toLowerCase();
+    const parts = u.pathname.split('/').filter(Boolean);
+    if ((h === 'vm.tiktok.com' || h === 'vt.tiktok.com') && parts.length >= 1) return true;
+    if (h.endsWith('tiktok.com') && parts[0]?.toLowerCase() === 't' && parts[1]) return true;
+  } catch {
+    return false;
+  }
+  return false;
+}
+
+export function explainInvalidHandleInput(raw, platformName = 'Social') {
+  const s = String(raw || '').trim();
+  if (!s) {
+    return `Please enter your ${platformName} @handle or profile link first.`;
+  }
+  if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s)) {
+    return `That looks like an email address. Please enter your public ${platformName} @username (for example @your_handle) or profile URL instead.`;
+  }
+  if (extractHandleForPlatform(s) === '') {
+    return `Please include your ${platformName} @username or full profile link (for example @your_handle), not just the ${platformName} homepage or login URL.`;
+  }
+  return '';
+}
+
 export function extractHandleForPlatform(raw) {
   const s = String(raw || '').trim();
   if (!s) return '';
-  try {
-    if (
-      s.startsWith('http://') ||
-      s.startsWith('https://') ||
-      s.includes('.com/') ||
-      s.includes('.net/')
-    ) {
-      const normalized = s.startsWith('http') ? s : `https://${s}`;
-      const u = new URL(normalized);
-      const parts = u.pathname
-        .split('/')
-        .map((p) => p.trim())
-        .filter(Boolean);
-      if (parts.length > 0) {
-        if (['c', 'channel', 'user'].includes(parts[0].toLowerCase()) && parts[1]) {
-          return parts[1].replace(/^@/, '');
-        }
-        if (
-          !['p', 'reel', 'reels', 'stories', 'explore', 'accounts', 'watch', 'login', 'i'].includes(
-            parts[0].toLowerCase()
-          )
-        ) {
-          return parts[0].replace(/^@/, '');
-        }
-      }
-    }
-  } catch {
-    // Fallback below
+
+  // Reject email addresses (e.g. user@gmail.com) so they are never sent as @handles
+  if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s)) {
+    return '';
   }
-  return s.replace(/^@/, '').replace(/^\/+|\/+$/g, '').split('/')[0].split('?')[0];
+
+  // Allow TikTok short share links (vm.tiktok.com/..., tiktok.com/t/...) through so backend resolves redirect
+  if (isShortTikTokShareUrl(s)) {
+    return s.startsWith('http') ? s : `https://${s}`;
+  }
+
+  const looksLikeUrlOrDomain =
+    /^https?:\/\//i.test(s) ||
+    s.includes('.com') ||
+    s.includes('.net') ||
+    s.includes('x.com') ||
+    s.includes('youtu.be');
+
+  if (looksLikeUrlOrDomain) {
+    try {
+      const normalized = /^https?:\/\//i.test(s) ? s : `https://${s}`;
+      const u = new URL(normalized);
+      if (isBareSocialDomain(u.hostname)) {
+        const parts = u.pathname
+          .split('/')
+          .map((p) => decodeURIComponent(p).trim())
+          .filter(Boolean);
+        if (parts.length === 0) {
+          return '';
+        }
+        if (['c', 'channel', 'user'].includes(parts[0].toLowerCase()) && parts[1]) {
+          const ch = parts[1].replace(/^@+\s*/, '').trim();
+          return RESERVED_SOCIAL_PATHS.has(ch.toLowerCase()) ? '' : ch;
+        }
+        // Support URLs like https://www.tiktok.com/@username/video/123456
+        const first = parts[0].replace(/^@+\s*/, '').trim();
+        if (!first || RESERVED_SOCIAL_PATHS.has(first.toLowerCase())) {
+          return '';
+        }
+        return first;
+      }
+    } catch {
+      return '';
+    }
+  }
+
+  const cleaned = s
+    .replace(/^@+\s*/, '')
+    .replace(/^\/+|\/+$/g, '')
+    .split('/')[0]
+    .split('?')[0]
+    .trim();
+
+  if (
+    !cleaned ||
+    cleaned === 'http:' ||
+    cleaned === 'https:' ||
+    cleaned.includes('@') ||
+    isBareSocialDomain(cleaned) ||
+    RESERVED_SOCIAL_PATHS.has(cleaned.toLowerCase())
+  ) {
+    return '';
+  }
+  return cleaned;
 }
 
 export function PlatformIcon({ platform, className = 'w-4 h-4' }) {

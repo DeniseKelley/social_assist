@@ -45,6 +45,7 @@ import {
   PLATFORM_BY_ID,
   PlatformIcon,
   extractHandleForPlatform,
+  explainInvalidHandleInput,
   buildCombinedPlatformAnalytics,
 } from './platforms';
 import {
@@ -215,12 +216,31 @@ export default function App() {
   const scopedKey = (base, emailOverride) => `${base}_v2:${getWorkspaceScope(emailOverride)}`;
 
   const loadSavedConnectionsMap = (emailOverride) => {
-    let map = {};
+    let rawMap = {};
     try {
-      map = JSON.parse(localStorage.getItem(scopedKey('sa_connections_map', emailOverride)) || '{}') || {};
+      rawMap =
+        JSON.parse(localStorage.getItem(scopedKey('sa_connections_map', emailOverride)) || '{}') || {};
     } catch {
-      map = {};
+      rawMap = {};
     }
+    const map = {};
+    let mutated = false;
+    for (const [platId, entry] of Object.entries(rawMap)) {
+      if (!entry || typeof entry !== 'object') {
+        mutated = true;
+        continue;
+      }
+      const cleaned = extractHandleForPlatform(entry.handle || '');
+      if (!cleaned || /^https?:\/\//i.test(cleaned)) {
+        mutated = true;
+        continue;
+      }
+      if (cleaned !== entry.handle) {
+        mutated = true;
+      }
+      map[platId] = { ...entry, handle: cleaned };
+    }
+
     // Seamless migration from single-platform `sa_connection` if present for this user
     if (!map.instagram) {
       try {
@@ -229,21 +249,22 @@ export default function App() {
         );
         if (legacyIg?.instagram_handle) {
           const cleanIg = extractHandleForPlatform(legacyIg.instagram_handle);
-          if (cleanIg) {
+          if (cleanIg && !/^https?:\/\//i.test(cleanIg)) {
             map.instagram = {
               handle: cleanIg,
               has_access_token: Boolean(legacyIg.has_access_token),
               connected_at: new Date().toISOString(),
             };
-            localStorage.setItem(
-              scopedKey('sa_connections_map', emailOverride),
-              JSON.stringify(map)
-            );
+            mutated = true;
           }
         }
       } catch {
         // ignore
       }
+    }
+
+    if (mutated) {
+      localStorage.setItem(scopedKey('sa_connections_map', emailOverride), JSON.stringify(map));
     }
     return map;
   };
@@ -285,23 +306,41 @@ export default function App() {
       headers.Authorization = `Bearer ${savedToken}`;
     }
 
-    const qs = new URLSearchParams({
-      platform: platformId,
-      handle: targetHandle,
-    });
-    if (forceRefresh) {
-      qs.set('refresh', 'true');
-    }
+    const buildUrl = (refreshFlag) => {
+      const qs = new URLSearchParams({
+        platform: platformId,
+        handle: targetHandle,
+      });
+      if (refreshFlag) {
+        qs.set('refresh', 'true');
+      }
+      return `/api/analytics?${qs.toString()}`;
+    };
 
-    const resp = await fetch(`/api/analytics?${qs.toString()}`, {
+    let resp = await fetch(buildUrl(forceRefresh), {
       headers,
       cache: forceRefresh ? 'no-store' : 'default',
     });
+
+    // Automatic retry once on transient 502/503/504 upstream gateway hiccups
+    if (resp.status >= 500) {
+      await new Promise((r) => setTimeout(r, 900));
+      resp = await fetch(buildUrl(true), {
+        headers,
+        cache: 'no-store',
+      });
+    }
+
     if (!resp.ok) {
       const errJson = await resp.json().catch(() => ({}));
-      throw new Error(
-        errJson.error || `${PLATFORM_BY_ID[platformId]?.name || platformId} returned HTTP ${resp.status}`
-      );
+      const baseMsg =
+        errJson.error ||
+        `${PLATFORM_BY_ID[platformId]?.name || platformId} returned HTTP ${resp.status}`;
+      const fullMsg =
+        errJson.detail && !baseMsg.includes(errJson.detail)
+          ? `${baseMsg} — ${errJson.detail}`
+          : baseMsg;
+      throw new Error(fullMsg);
     }
     const data = await resp.json();
     setAnalyticsByPlatform((prev) => {
@@ -603,16 +642,37 @@ export default function App() {
     const meta = PLATFORM_BY_ID[connectPlatform] || PLATFORM_BY_ID.instagram;
     const extracted = extractHandleForPlatform(handleInput);
     if (!extracted) {
+      const invalidMsg = explainInvalidHandleInput(handleInput, meta.name);
       setConnectStatusMsg({
         type: 'error',
-        text: `Please enter your ${meta.name} @handle or profile link first.`,
+        text: invalidMsg,
       });
-      showToast(`Enter your ${meta.name} @handle or profile link first!`, 'error');
+      showToast(invalidMsg, 'error');
       return;
     }
     // Open the platform's sign-in / authorization window immediately on the user's click gesture
     const targetUrl = meta.buildLoginUrl(extracted);
-    window.open(targetUrl, `${meta.id}_login_window`, 'width=620,height=720');
+    const popupWin = window.open(targetUrl, `${meta.id}_login_window`, 'width=620,height=720');
+
+    // Re-sync live stats automatically once the user returns from logging into the platform window
+    const onReturnFocus = () => {
+      window.removeEventListener('focus', onReturnFocus);
+      const savedMap = loadSavedConnectionsMap();
+      const handleToSync = savedMap[meta.id]?.handle || extracted;
+      if (handleToSync) {
+        fetchPlatformAnalytics({
+          platformId: meta.id,
+          overrideHandle: handleToSync,
+          forceRefresh: true,
+        }).catch(() => {});
+      }
+    };
+    if (popupWin) {
+      setTimeout(() => {
+        window.addEventListener('focus', onReturnFocus, { once: true });
+      }, 1500);
+    }
+
     await handleConnectSubmit(null, extracted);
   };
 
@@ -621,9 +681,10 @@ export default function App() {
     const meta = PLATFORM_BY_ID[connectPlatform] || PLATFORM_BY_ID.instagram;
     const cleanHandle = overrideHandle || extractHandleForPlatform(handleInput);
     if (!cleanHandle && !(tokenInput && tokenInput.trim())) {
+      const invalidMsg = explainInvalidHandleInput(handleInput, meta.name);
       setConnectStatusMsg({
         type: 'error',
-        text: `Please enter a ${meta.name} @handle, profile URL, or API token.`,
+        text: invalidMsg,
       });
       return;
     }
@@ -694,10 +755,18 @@ export default function App() {
         setActiveTab('analytics');
         triggerFairyWand();
       } else {
+        // Verify & pull live stats FIRST before persisting handle to workspace storage
+        const liveAna = await fetchPlatformAnalytics({
+          platformId: meta.id,
+          overrideHandle: cleanHandle,
+          forceRefresh: true,
+        });
+        const resolvedHandle = liveAna?.profile?.username || cleanHandle;
+
         const nextConns = {
           ...cMap,
           [meta.id]: {
-            handle: cleanHandle,
+            handle: resolvedHandle,
             has_access_token: Boolean(tMap[meta.id]),
             connected_at: new Date().toISOString(),
           },
@@ -707,26 +776,20 @@ export default function App() {
           localStorage.setItem(
             scopedKey('sa_connection'),
             JSON.stringify({
-              instagram_handle: cleanHandle,
+              instagram_handle: resolvedHandle,
               has_access_token: Boolean(tMap.instagram),
             })
           );
         }
         setConnectionsMap(nextConns);
-        setHandleInput(meta.buildProfileUrl(cleanHandle));
-
-        const liveAna = await fetchPlatformAnalytics({
-          platformId: meta.id,
-          overrideHandle: cleanHandle,
-          forceRefresh: true,
-        });
+        setHandleInput(meta.buildProfileUrl(resolvedHandle));
         setSelectedPlatform(meta.id);
         setOpenclawOutput(runLocalOpenClawAnalysis(openclawPrompt, liveAna || EMPTY_WORKSPACE_ANALYTICS));
         setConnectStatusMsg({
           type: 'success',
-          text: `Redirected to ${meta.name} & synced live stats for @${cleanHandle}!`,
+          text: `Redirected to ${meta.name} & synced live stats for @${resolvedHandle}!`,
         });
-        showToast(`Connected ${meta.name} & pulled live stats for @${cleanHandle}!`);
+        showToast(`Connected ${meta.name} & pulled live stats for @${resolvedHandle}!`);
         setActiveTab('analytics');
         triggerFairyWand();
       }
@@ -3978,12 +4041,27 @@ export default function App() {
                     className="w-full px-4 py-3 rounded-xl bg-white border-2 border-[#19154E] text-sm font-bold text-[#19154E] focus:outline-none"
                   />
                   <p className="text-xs text-neutral-600 font-medium">
-                    Detected {connectMeta.name} account:{' '}
-                    <strong className="font-mono-code text-[#6D28D9]">
-                      {extractHandleForPlatform(handleInput)
-                        ? `@${extractHandleForPlatform(handleInput)}`
-                        : `Enter your ${connectMeta.name} handle above`}
-                    </strong>
+                    {extractHandleForPlatform(handleInput) ? (
+                      <>
+                        Detected {connectMeta.name} account:{' '}
+                        <strong className="font-mono-code text-[#6D28D9]">
+                          {/^https?:\/\//i.test(extractHandleForPlatform(handleInput))
+                            ? 'Share link (will auto-resolve @handle)'
+                            : `@${extractHandleForPlatform(handleInput)}`}
+                        </strong>
+                      </>
+                    ) : handleInput.trim() ? (
+                      <span className="text-rose-700 font-bold">
+                        {explainInvalidHandleInput(handleInput, connectMeta.name)}
+                      </span>
+                    ) : (
+                      <>
+                        Detected {connectMeta.name} account:{' '}
+                        <strong className="font-mono-code text-[#6D28D9]">
+                          Enter your {connectMeta.name} @handle above
+                        </strong>
+                      </>
+                    )}
                   </p>
                 </div>
 
