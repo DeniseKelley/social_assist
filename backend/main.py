@@ -1,5 +1,9 @@
+import base64
+import hashlib
+import hmac
 import json
 import os
+import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -9,7 +13,7 @@ import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -1804,3 +1808,411 @@ async def dispatch_multiplatform_publish(req: PublishDispatchRequest):
         "overall_status": "failed" if all_failed else ("published" if any_live else "queued"),
         "results": results,
     }
+
+
+# ---------------------------------------------------------------------------
+# API Endpoint: 1-Click Multi-Platform OAuth (`/api/oauth`)
+# ---------------------------------------------------------------------------
+
+def _get_oauth_redirect_uri(request: Request) -> str:
+    env_uri = (os.getenv("OAUTH_REDIRECT_URI") or "").strip()
+    if env_uri:
+        return env_uri
+    proto = request.headers.get("x-forwarded-proto") or request.url.scheme or "http"
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or "localhost:8000"
+    return f"{proto}://{host}/api/oauth"
+
+
+def _get_oauth_provider_creds(platform: str) -> Dict[str, str]:
+    cfg = get_config()
+    p = platform.lower().strip()
+    if p == "instagram":
+        return {
+            "client_id": (os.getenv("INSTAGRAM_APP_ID") or cfg.get("app_id") or "").strip(),
+            "client_secret": (os.getenv("INSTAGRAM_APP_SECRET") or cfg.get("app_secret") or "").strip(),
+        }
+    if p == "threads":
+        return {
+            "client_id": (
+                os.getenv("THREADS_APP_ID") or os.getenv("INSTAGRAM_APP_ID") or cfg.get("app_id") or ""
+            ).strip(),
+            "client_secret": (
+                os.getenv("THREADS_APP_SECRET")
+                or os.getenv("INSTAGRAM_APP_SECRET")
+                or cfg.get("app_secret")
+                or ""
+            ).strip(),
+        }
+    if p == "facebook":
+        return {
+            "client_id": (os.getenv("FACEBOOK_APP_ID") or "").strip(),
+            "client_secret": (os.getenv("FACEBOOK_APP_SECRET") or "").strip(),
+        }
+    if p == "tiktok":
+        return {
+            "client_id": (os.getenv("TIKTOK_CLIENT_KEY") or "").strip(),
+            "client_secret": (os.getenv("TIKTOK_CLIENT_SECRET") or "").strip(),
+        }
+    if p == "youtube":
+        return {
+            "client_id": (os.getenv("GOOGLE_CLIENT_ID") or "").strip(),
+            "client_secret": (os.getenv("GOOGLE_CLIENT_SECRET") or "").strip(),
+        }
+    if p == "x":
+        return {
+            "client_id": (os.getenv("X_CLIENT_ID") or "").strip(),
+            "client_secret": (os.getenv("X_CLIENT_SECRET") or "").strip(),
+        }
+    return {"client_id": "", "client_secret": ""}
+
+
+def _b64url(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _sign_oauth_state(payload: Dict[str, Any]) -> str:
+    secret = (
+        os.getenv("OAUTH_STATE_SECRET")
+        or os.getenv("INSTAGRAM_APP_SECRET")
+        or "sa_ephemeral_oauth_state_key"
+    ).encode("utf-8")
+    body = _b64url(json.dumps(payload).encode("utf-8"))
+    sig = _b64url(hmac.new(secret, body.encode("ascii"), hashlib.sha256).digest())
+    return f"{body}.{sig}"
+
+
+def _verify_oauth_state(raw_state: str) -> Optional[Dict[str, Any]]:
+    if not raw_state or "." not in raw_state:
+        return None
+    body, sig = raw_state.split(".", 1)
+    secret = (
+        os.getenv("OAUTH_STATE_SECRET")
+        or os.getenv("INSTAGRAM_APP_SECRET")
+        or "sa_ephemeral_oauth_state_key"
+    ).encode("utf-8")
+    expected = _b64url(hmac.new(secret, body.encode("ascii"), hashlib.sha256).digest())
+    if not hmac.compare_digest(sig, expected):
+        return None
+    try:
+        padded = body + "=" * (-len(body) % 4)
+        return json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
+    except Exception:
+        return None
+
+
+def _render_oauth_popup_html(ok: bool, payload: Dict[str, Any], error_msg: str, origin: str) -> str:
+    safe_origin = origin if origin.startswith(("http://", "https://")) else "*"
+    msg_obj = (
+        {"type": "SA_OAUTH_SUCCESS", **payload}
+        if ok
+        else {"type": "SA_OAUTH_ERROR", "error": error_msg or "Authorization cancelled"}
+    )
+    msg_json = json.dumps(msg_obj).replace("<", "\\u003c")
+    title = f"Connected {payload.get('platform', '').upper()}!" if ok else "Connection Incomplete"
+    sub = (
+        "Publishing & analytics permissions linked automatically. Returning to SocialAssist..."
+        if ok
+        else error_msg
+    )
+    icon = "✨" if ok else "⚠️"
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8" /><title>SocialAssist 1-Click Connect</title></head>
+<body style="background:#FFF8FC;color:#19154E;font-family:system-ui,-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;">
+  <div style="background:#FFFFFF;border:2px solid #19154E;box-shadow:5px 5px 0px #19154E;border-radius:24px;padding:32px;max-width:420px;text-align:center;">
+    <div style="font-size:32px;margin-bottom:8px;">{icon}</div>
+    <h2 style="margin:0 0 8px;font-size:20px;">{title}</h2>
+    <p style="margin:0;font-size:14px;color:#4b5563;">{sub}</p>
+  </div>
+  <script>
+    (function() {{
+      var msg = {msg_json};
+      if (window.opener) {{
+        window.opener.postMessage(msg, {json.dumps(safe_origin)});
+        setTimeout(function() {{ window.close(); }}, 900);
+      }}
+    }})();
+  </script>
+</body>
+</html>"""
+
+
+@app.get("/api/oauth")
+async def oauth_gateway(
+    request: Request,
+    action: Optional[str] = None,
+    platform: str = "instagram",
+    origin: str = "",
+    code: Optional[str] = None,
+    state: Optional[str] = None,
+    error: Optional[str] = None,
+    error_description: Optional[str] = None,
+):
+    redirect_uri = _get_oauth_redirect_uri(request)
+    is_cb = bool(code or error or (state and not action))
+    resolved_action = "callback" if is_cb else (action or "providers").lower()
+
+    if resolved_action == "providers":
+        platforms = ["instagram", "tiktok", "youtube", "facebook", "x", "threads"]
+        configured = {
+            p: bool(_get_oauth_provider_creds(p)["client_id"] and _get_oauth_provider_creds(p)["client_secret"])
+            for p in platforms
+        }
+        return JSONResponse({"ok": True, "redirect_uri": redirect_uri, "providers": configured})
+
+    if resolved_action == "start":
+        plat = platform.lower().strip()
+        creds = _get_oauth_provider_creds(plat)
+        if not creds["client_id"] or not creds["client_secret"]:
+            return HTMLResponse(
+                _render_oauth_popup_html(
+                    False,
+                    {},
+                    f"OAuth Client ID/Secret for {plat.upper()} is not configured on the server yet.",
+                    origin,
+                )
+            )
+        verifier = _b64url(secrets.token_bytes(32))
+        challenge = _b64url(hashlib.sha256(verifier.encode("ascii")).digest())
+        signed_state = _sign_oauth_state({"p": plat, "o": origin, "v": verifier})
+
+        if plat == "instagram":
+            qs = urlencode({
+                "enable_fb_login": "0",
+                "force_authentication": "1",
+                "client_id": creds["client_id"],
+                "redirect_uri": redirect_uri,
+                "response_type": "code",
+                "scope": "instagram_business_basic,instagram_business_content_publish,instagram_business_manage_messages,instagram_business_manage_comments",
+                "state": signed_state,
+            })
+            return RedirectResponse(f"https://www.instagram.com/oauth/authorize?{qs}")
+        if plat == "threads":
+            qs = urlencode({
+                "client_id": creds["client_id"],
+                "redirect_uri": redirect_uri,
+                "scope": "threads_basic,threads_content_publish",
+                "response_type": "code",
+                "state": signed_state,
+            })
+            return RedirectResponse(f"https://threads.net/oauth/authorize?{qs}")
+        if plat == "facebook":
+            qs = urlencode({
+                "client_id": creds["client_id"],
+                "redirect_uri": redirect_uri,
+                "scope": "pages_show_list,pages_read_engagement,pages_manage_posts",
+                "response_type": "code",
+                "state": signed_state,
+            })
+            return RedirectResponse(f"https://www.facebook.com/v21.0/dialog/oauth?{qs}")
+        if plat == "tiktok":
+            qs = urlencode({
+                "client_key": creds["client_id"],
+                "redirect_uri": redirect_uri,
+                "scope": "user.info.basic,video.publish,video.upload",
+                "response_type": "code",
+                "state": signed_state,
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+            })
+            return RedirectResponse(f"https://www.tiktok.com/v2/auth/authorize/?{qs}")
+        if plat == "youtube":
+            qs = urlencode({
+                "client_id": creds["client_id"],
+                "redirect_uri": redirect_uri,
+                "response_type": "code",
+                "access_type": "offline",
+                "prompt": "consent",
+                "scope": "https://www.googleapis.com/auth/youtube.readonly https://www.googleapis.com/auth/youtube.upload",
+                "state": signed_state,
+            })
+            return RedirectResponse(f"https://accounts.google.com/o/oauth2/v2/auth?{qs}")
+        if plat == "x":
+            qs = urlencode({
+                "response_type": "code",
+                "client_id": creds["client_id"],
+                "redirect_uri": redirect_uri,
+                "scope": "tweet.read tweet.write users.read offline.access",
+                "state": signed_state,
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+            })
+            return RedirectResponse(f"https://twitter.com/i/oauth2/authorize?{qs}")
+
+        return HTMLResponse(_render_oauth_popup_html(False, {}, f"Unsupported platform: {plat}", origin))
+
+    if resolved_action == "callback":
+        st = _verify_oauth_state(state or "")
+        if not st:
+            return HTMLResponse(
+                _render_oauth_popup_html(False, {}, "Invalid or expired OAuth state signature.", "*"),
+                status_code=400,
+            )
+        target_origin = st.get("o") or "*"
+        plat = st.get("p") or "instagram"
+        verifier = st.get("v") or ""
+        if error or not code:
+            return HTMLResponse(
+                _render_oauth_popup_html(False, {}, error_description or error or "Authorization cancelled.", target_origin)
+            )
+        clean_code = code.split("#_")[0]
+        creds = _get_oauth_provider_creds(plat)
+
+        try:
+            async with httpx.AsyncClient(timeout=25.0) as client:
+                if plat == "instagram":
+                    tr = await client.post(
+                        "https://api.instagram.com/oauth/access_token",
+                        data={
+                            "client_id": creds["client_id"],
+                            "client_secret": creds["client_secret"],
+                            "grant_type": "authorization_code",
+                            "redirect_uri": redirect_uri,
+                            "code": clean_code,
+                        },
+                    )
+                    td = tr.json()
+                    tok = td.get("access_token") or (td.get("data") or [{}])[0].get("access_token")
+                    if not tok:
+                        raise ValueError(td.get("error_message") or "Instagram token exchange failed.")
+                    llr = await client.get(
+                        "https://graph.instagram.com/access_token",
+                        params={"grant_type": "ig_exchange_token", "client_secret": creds["client_secret"], "access_token": tok},
+                    )
+                    if llr.status_code == 200 and llr.json().get("access_token"):
+                        tok = llr.json()["access_token"]
+                    mr = await client.get(
+                        "https://graph.instagram.com/v21.0/me",
+                        params={"fields": "id,user_id,username", "access_token": tok},
+                    )
+                    me = mr.json() if mr.status_code == 200 else {}
+                    payload = {
+                        "platform": "instagram",
+                        "access_token": tok,
+                        "account_id": me.get("user_id") or me.get("id") or "",
+                        "handle": me.get("username") or "",
+                    }
+                elif plat == "threads":
+                    tr = await client.post(
+                        "https://graph.threads.net/oauth/access_token",
+                        data={
+                            "client_id": creds["client_id"],
+                            "client_secret": creds["client_secret"],
+                            "grant_type": "authorization_code",
+                            "redirect_uri": redirect_uri,
+                            "code": clean_code,
+                        },
+                    )
+                    tok = tr.json().get("access_token")
+                    if not tok:
+                        raise ValueError("Threads token exchange failed.")
+                    mr = await client.get(
+                        "https://graph.threads.net/v1.0/me",
+                        params={"fields": "id,username", "access_token": tok},
+                    )
+                    me = mr.json() if mr.status_code == 200 else {}
+                    payload = {"platform": "threads", "access_token": tok, "account_id": me.get("id") or "", "handle": me.get("username") or ""}
+                elif plat == "facebook":
+                    tr = await client.get(
+                        "https://graph.facebook.com/v21.0/oauth/access_token",
+                        params={
+                            "client_id": creds["client_id"],
+                            "client_secret": creds["client_secret"],
+                            "redirect_uri": redirect_uri,
+                            "code": clean_code,
+                        },
+                    )
+                    tok = tr.json().get("access_token")
+                    if not tok:
+                        raise ValueError("Facebook token exchange failed.")
+                    pr = await client.get(
+                        "https://graph.facebook.com/v21.0/me/accounts",
+                        params={"fields": "id,name,username,access_token", "access_token": tok},
+                    )
+                    first_page = ((pr.json() if pr.status_code == 200 else {}).get("data") or [{}])[0]
+                    payload = {
+                        "platform": "facebook",
+                        "access_token": first_page.get("access_token") or tok,
+                        "account_id": first_page.get("id") or "",
+                        "handle": first_page.get("username") or first_page.get("id") or "",
+                    }
+                elif plat == "tiktok":
+                    tr = await client.post(
+                        "https://open.tiktokapis.com/v2/oauth/token/",
+                        data={
+                            "client_key": creds["client_id"],
+                            "client_secret": creds["client_secret"],
+                            "code": clean_code,
+                            "grant_type": "authorization_code",
+                            "redirect_uri": redirect_uri,
+                            "code_verifier": verifier,
+                        },
+                    )
+                    td = tr.json()
+                    tok = td.get("access_token")
+                    if not tok:
+                        raise ValueError(td.get("error_description") or "TikTok token exchange failed.")
+                    mr = await client.get(
+                        "https://open.tiktokapis.com/v2/user/info/?fields=open_id,username,display_name",
+                        headers={"Authorization": f"Bearer {tok}"},
+                    )
+                    u = ((mr.json() if mr.status_code == 200 else {}).get("data") or {}).get("user") or {}
+                    payload = {
+                        "platform": "tiktok",
+                        "access_token": tok,
+                        "account_id": td.get("open_id") or u.get("open_id") or "",
+                        "handle": u.get("username") or u.get("display_name") or "",
+                    }
+                elif plat == "youtube":
+                    tr = await client.post(
+                        "https://oauth2.googleapis.com/token",
+                        data={
+                            "client_id": creds["client_id"],
+                            "client_secret": creds["client_secret"],
+                            "code": clean_code,
+                            "grant_type": "authorization_code",
+                            "redirect_uri": redirect_uri,
+                        },
+                    )
+                    tok = tr.json().get("access_token")
+                    if not tok:
+                        raise ValueError("YouTube token exchange failed.")
+                    cr = await client.get(
+                        "https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true",
+                        headers={"Authorization": f"Bearer {tok}"},
+                    )
+                    ch = ((cr.json() if cr.status_code == 200 else {}).get("items") or [{}])[0]
+                    snippet = ch.get("snippet") or {}
+                    payload = {
+                        "platform": "youtube",
+                        "access_token": tok,
+                        "account_id": ch.get("id") or "",
+                        "handle": (snippet.get("customUrl") or "").lstrip("@") or snippet.get("title") or "",
+                    }
+                elif plat == "x":
+                    basic = base64.b64encode(f"{creds['client_id']}:{creds['client_secret']}".encode("utf-8")).decode("ascii")
+                    tr = await client.post(
+                        "https://api.x.com/2/oauth2/token",
+                        headers={"Authorization": f"Basic {basic}"},
+                        data={
+                            "code": clean_code,
+                            "grant_type": "authorization_code",
+                            "redirect_uri": redirect_uri,
+                            "code_verifier": verifier,
+                        },
+                    )
+                    tok = tr.json().get("access_token")
+                    if not tok:
+                        raise ValueError("X token exchange failed.")
+                    mr = await client.get("https://api.x.com/2/users/me", headers={"Authorization": f"Bearer {tok}"})
+                    u = (mr.json() if mr.status_code == 200 else {}).get("data") or {}
+                    payload = {"platform": "x", "access_token": tok, "account_id": u.get("id") or "", "handle": u.get("username") or ""}
+                else:
+                    raise ValueError(f"Unsupported platform: {plat}")
+
+            return HTMLResponse(_render_oauth_popup_html(True, payload, "", target_origin))
+        except Exception as exc:
+            return HTMLResponse(_render_oauth_popup_html(False, {}, str(exc), target_origin))
+
+    return JSONResponse({"error": "Unknown action"}, status_code=400)
+

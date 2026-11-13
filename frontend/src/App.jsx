@@ -30,7 +30,6 @@ import {
 import PlannerCalendar from './PlannerCalendar';
 import {
   TechFairyCharacter,
-  DataAstronomerCharacter,
   PlugMechanicCharacter,
 } from './CartoonCharacters';
 import {
@@ -59,7 +58,7 @@ import {
 import PoliciesModal from './PoliciesModal';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState('automations'); // 'automations' | 'analytics' | 'strategy' | 'connect'
+  const [activeTab, setActiveTab] = useState('analytics'); // 'analytics' | 'planner' | 'automations' | 'strategy' | 'connect'
   const [selectedPlatform, setSelectedPlatform] = useState('all'); // 'all' | 'instagram' | 'tiktok' | 'youtube' | 'facebook' | 'x' | 'threads'
   const [connectPlatform, setConnectPlatform] = useState('instagram'); // 'instagram' | 'tiktok' | 'youtube' | 'facebook' | 'x' | 'threads'
   const [connectionsMap, setConnectionsMap] = useState({});
@@ -94,13 +93,15 @@ export default function App() {
   const verifiedUserIdsRef = useRef(new Set());
   const signingOutGuardRef = useRef(false);
 
-  // Connect form state
+  // Connect form & 1-Click OAuth state
   const [handleInput, setHandleInput] = useState('');
   const [tokenInput, setTokenInput] = useState('');
   const [appIdInput, setAppIdInput] = useState('');
   const [appSecretInput, setAppSecretInput] = useState('');
   const [connectStatusMsg, setConnectStatusMsg] = useState(null);
   const [copiedField, setCopiedField] = useState(null);
+  const [oauthProviders, setOauthProviders] = useState({});
+  const [oauthRedirectUri, setOauthRedirectUri] = useState('');
 
   // New Automation Drawer state
   const [showNewFlow, setShowNewFlow] = useState(false);
@@ -651,8 +652,121 @@ export default function App() {
       fetchAll(email);
     });
 
-    const handleOAuthMessage = (event) => {
-      if (event.data && event.data.type === 'IG_OAUTH_SUCCESS') {
+    fetch('/api/oauth?action=providers')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (d?.providers) setOauthProviders(d.providers);
+        if (d?.redirect_uri) setOauthRedirectUri(d.redirect_uri);
+      })
+      .catch(() => {});
+
+    const handleOAuthMessage = async (event) => {
+      if (!event?.data) return;
+      if (event.data.type === 'SA_OAUTH_ERROR') {
+        const errText = event.data.error || '1-Click authorization was cancelled.';
+        setConnectStatusMsg({ type: 'error', text: errText });
+        showToast(errText, 'error');
+        return;
+      }
+      if (event.data.type === 'SA_OAUTH_SUCCESS') {
+        const { platform, access_token, account_id, handle } = event.data;
+        const emailScope = sessionStorage.getItem('sa_user_email') || '';
+        const meta = PLATFORM_BY_ID[platform] || PLATFORM_BY_ID.instagram;
+        const cleanTok = String(access_token || '').trim();
+        const cleanHandle =
+          extractHandleForPlatform(handle || '') || String(handle || '').replace(/^@/, '') || 'creator';
+        const cleanAccId = String(account_id || '').trim();
+
+        const cMap = loadSavedConnectionsMap(emailScope);
+        const tMap = loadSavedTokensMap(emailScope);
+
+        if (cleanTok) {
+          tMap[meta.id] = cleanTok;
+          localStorage.setItem(scopedKey('sa_tokens_map', emailScope), JSON.stringify(tMap));
+          if (meta.id === 'instagram') {
+            localStorage.setItem(scopedKey('sa_ig_access_token', emailScope), cleanTok);
+          }
+
+          let plannerToks = {};
+          try {
+            plannerToks =
+              JSON.parse(localStorage.getItem(scopedKey('sa_platform_tokens', emailScope)) || '{}') ||
+              {};
+          } catch {
+            plannerToks = {};
+          }
+          plannerToks[meta.id] = {
+            ...(plannerToks[meta.id] || {}),
+            access_token: cleanTok,
+            account_id: cleanAccId,
+          };
+          localStorage.setItem(
+            scopedKey('sa_platform_tokens', emailScope),
+            JSON.stringify(plannerToks)
+          );
+
+          // Sync token to RLS-isolated Supabase row so 24/7 scheduled posts auto-publish!
+          supabase.auth
+            .getUser()
+            .then(({ data }) => {
+              const uid = data?.user?.id;
+              if (uid) {
+                supabase
+                  .from('user_platform_tokens')
+                  .upsert(
+                    {
+                      user_id: uid,
+                      tokens: plannerToks,
+                      updated_at: new Date().toISOString(),
+                    },
+                    { onConflict: 'user_id' }
+                  )
+                  .catch(() => {});
+              }
+            })
+            .catch(() => {});
+        }
+
+        let nextConns = {
+          ...cMap,
+          [meta.id]: {
+            handle: cleanHandle,
+            has_access_token: Boolean(cleanTok),
+            account_id: cleanAccId,
+            oauth_connected: true,
+            connected_at: new Date().toISOString(),
+          },
+        };
+        localStorage.setItem(scopedKey('sa_connections_map', emailScope), JSON.stringify(nextConns));
+        if (meta.id === 'instagram') {
+          localStorage.setItem(
+            scopedKey('sa_connection', emailScope),
+            JSON.stringify({
+              instagram_handle: cleanHandle,
+              has_access_token: Boolean(cleanTok),
+              account_id: cleanAccId,
+            })
+          );
+        }
+
+        setConnectionsMap(nextConns);
+        setHandleInput(meta.buildProfileUrl(cleanHandle));
+        setSelectedPlatform(meta.id);
+        setConnectStatusMsg({
+          type: 'success',
+          text: `⚡ 1-Click Connected @${cleanHandle} (${meta.name}) — Live Analytics & Auto-Publishing Ready!`,
+        });
+        showToast(`⚡ Connected @${cleanHandle} (${meta.name}) with 1-Click Auto-Publishing!`);
+        triggerFairyWand();
+        fetchPlatformAnalytics({
+          platformId: meta.id,
+          overrideHandle: cleanHandle,
+          forceRefresh: true,
+          emailOverride: emailScope,
+        }).catch(() => {});
+        return;
+      }
+      if (event.data.type === 'IG_OAUTH_SUCCESS') {
         showToast('Connected Instagram via OAuth!');
         fetchAll(sessionStorage.getItem('sa_user_email') || '');
       }
@@ -751,10 +865,24 @@ export default function App() {
     }
   };
 
+  const handleOneClickOAuthConnect = (platId = connectPlatform) => {
+    const meta = PLATFORM_BY_ID[platId] || PLATFORM_BY_ID.instagram;
+    const origin = typeof window !== 'undefined' ? window.location.origin : '';
+    const oauthUrl = `/api/oauth?action=start&platform=${encodeURIComponent(meta.id)}&origin=${encodeURIComponent(origin)}`;
+    window.open(oauthUrl, `${meta.id}_oauth_window`, 'width=620,height=740');
+  };
+
   const handleConnectAndRedirect = async (e) => {
     if (e) e.preventDefault();
     const meta = PLATFORM_BY_ID[connectPlatform] || PLATFORM_BY_ID.instagram;
     const extracted = extractHandleForPlatform(handleInput);
+
+    // If 1-Click OAuth is configured on the server and no handle was typed, launch OAuth directly!
+    if (!extracted && oauthProviders[meta.id]) {
+      handleOneClickOAuthConnect(meta.id);
+      return;
+    }
+
     if (!extracted) {
       const invalidMsg = explainInvalidHandleInput(handleInput, meta.name);
       setConnectStatusMsg({
@@ -764,9 +892,13 @@ export default function App() {
       showToast(invalidMsg, 'error');
       return;
     }
-    // Open the platform's sign-in / authorization window immediately on the user's click gesture
-    const targetUrl = meta.buildLoginUrl(extracted);
-    const popupWin = window.open(targetUrl, `${meta.id}_login_window`, 'width=620,height=720');
+
+    // Open 1-Click OAuth popup if configured on server, otherwise open platform sign-in window
+    const origin = typeof window !== 'undefined' ? window.location.origin : '';
+    const targetUrl = oauthProviders[meta.id]
+      ? `/api/oauth?action=start&platform=${encodeURIComponent(meta.id)}&origin=${encodeURIComponent(origin)}`
+      : meta.buildLoginUrl(extracted);
+    const popupWin = window.open(targetUrl, `${meta.id}_login_window`, 'width=620,height=740');
 
     // Re-sync live stats automatically once the user returns from logging into the platform window
     const onReturnFocus = () => {
@@ -829,6 +961,39 @@ export default function App() {
         if (meta.id === 'instagram') {
           localStorage.setItem(scopedKey('sa_ig_access_token'), cleanToken);
         }
+
+        // Also mirror into Planner & Supabase `user_platform_tokens` for 24/7 auto-publishing
+        let plannerToks = {};
+        try {
+          plannerToks =
+            JSON.parse(localStorage.getItem(scopedKey('sa_platform_tokens')) || '{}') || {};
+        } catch {
+          plannerToks = {};
+        }
+        plannerToks[meta.id] = {
+          ...(plannerToks[meta.id] || {}),
+          access_token: cleanToken,
+          account_id: liveAna.profile?.account_id || '',
+        };
+        localStorage.setItem(scopedKey('sa_platform_tokens'), JSON.stringify(plannerToks));
+        supabase.auth
+          .getUser()
+          .then(({ data }) => {
+            if (data?.user?.id) {
+              supabase
+                .from('user_platform_tokens')
+                .upsert(
+                  {
+                    user_id: data.user.id,
+                    tokens: plannerToks,
+                    updated_at: new Date().toISOString(),
+                  },
+                  { onConflict: 'user_id' }
+                )
+                .catch(() => {});
+            }
+          })
+          .catch(() => {});
 
         let nextConns = {
           ...cMap,
@@ -2091,8 +2256,35 @@ export default function App() {
     return selectedPlatform === 'all' || fp === 'all' || fp === selectedPlatform;
   });
 
+  const activeFlowsCount = automations.filter((a) => a.active).length;
+  const navItems = [
+    { id: 'analytics', label: 'Overview', icon: BarChart3, accent: 'text-[#C8F904]' },
+    { id: 'planner', label: 'Planner', icon: Calendar, accent: 'text-[#FF7EB6]' },
+    {
+      id: 'automations',
+      label: 'Auto-DMs',
+      icon: MessageSquare,
+      accent: 'text-[#B799E8]',
+      badge: activeFlowsCount > 0 ? String(activeFlowsCount) : null,
+    },
+    { id: 'strategy', label: 'AI Strategy', icon: Sparkles, accent: 'text-[#C8F904]' },
+    {
+      id: 'connect',
+      label: 'Connections',
+      icon: KeyRound,
+      accent: 'text-[#FF7EB6]',
+      badge: `${connectedPlatformIds.length}/6`,
+    },
+  ];
+
   return (
-    <div className="min-h-screen bg-[#FFF8FC] text-[#19154E] flex flex-col">
+    <div className="min-h-screen bg-[#FFF8FC] text-[#19154E] flex flex-col lg:flex-row">
+      <PoliciesModal
+        isOpen={policiesModal.open}
+        initialSection={policiesModal.section}
+        onClose={() => setPoliciesModal((prev) => ({ ...prev, open: false }))}
+      />
+
       {/* Toast Notification */}
       {toast && (
         <div
@@ -2107,335 +2299,361 @@ export default function App() {
         </div>
       )}
 
-      {/* Top Editorial Navigation Bar (Clay.global + Upqode style) */}
-      <header className="sticky top-0 z-30 bg-[#FFF8FC]/90 backdrop-blur-md border-b-2 border-[#19154E]">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 h-20 flex items-center justify-between gap-4">
-          <div className="flex items-center gap-3.5">
-            <div className="w-12 h-12 rounded-2xl bg-[#FF7EB6] border-2 border-[#19154E] shadow-[3px_3px_0px_#19154E] flex items-center justify-center text-white">
-              <PlatformIcon
-                platform={selectedPlatform === 'all' ? 'globe' : selectedPlatform}
-                className="w-6 h-6"
-              />
-            </div>
-            <div>
-              <div className="flex items-center gap-2.5">
-                <h1 className="font-display font-bold text-xl sm:text-2xl tracking-tight text-[#19154E]">
-                  SocialAssist
-                </h1>
-                <button
-                  type="button"
-                  onClick={() => setActiveTab('connect')}
-                  title="Connect or manage Instagram, TikTok, YouTube, Facebook, X & Threads"
-                  className="text-xs px-2.5 py-0.5 rounded-full bg-[#C8F904] text-[#19154E] border-2 border-[#19154E] font-bold hover:opacity-90"
-                >
-                  {connectedPlatformIds.length > 0
-                    ? `${connectedPlatformIds.length} Connected`
-                    : '+ Connect Accounts'}
-                </button>
-                <a
-                  href="../index.html"
-                  className="text-[11px] px-2 py-0.5 rounded-lg bg-white border border-[#19154E] font-bold text-neutral-700 hover:bg-[#B799E8] hover:text-[#19154E] transition-colors duration-150 hidden md:inline-block"
-                  title="Return to TechFairyLab Home"
-                >
-                  ← TechFairyLab
-                </a>
-              </div>
-              <p
-                data-testid="signed-in-banner"
-                className="text-xs font-medium text-neutral-600 hidden sm:block"
-              >
-                {currentUserEmail
-                  ? currentUsername
-                    ? `Signed in as ${currentUsername} (${currentUserEmail})`
-                    : `Signed in as ${currentUserEmail}`
-                  : 'Multi-Platform Auto-DM Studio & Live Growth Observatory'}
-              </p>
-            </div>
-          </div>
-
-          {/* Tactile Pill Navigation Tabs */}
-          <nav className="flex flex-wrap items-center gap-1.5 bg-[#F5EEFF] p-1.5 rounded-2xl border-2 border-[#19154E]">
-            <button
-              onClick={() => setActiveTab('planner')}
-              className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs sm:text-sm font-bold transition-colors duration-150 ${
-                activeTab === 'planner'
-                  ? 'bg-[#19154E] text-[#FFF8FC]'
-                  : 'text-[#19154E] hover:bg-white/70'
-              }`}
-            >
-              <Calendar className="w-4 h-4 text-[#C8F904]" />
-              <span>Planner</span>
-            </button>
-            <button
-              onClick={() => setActiveTab('automations')}
-              className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs sm:text-sm font-bold transition-colors duration-150 ${
-                activeTab === 'automations'
-                  ? 'bg-[#19154E] text-[#FFF8FC]'
-                  : 'text-[#19154E] hover:bg-white/70'
-              }`}
-            >
-              <MessageSquare className="w-4 h-4 text-[#FF7EB6]" />
-              <span>Auto-DMs</span>
-            </button>
-            <button
-              onClick={() => setActiveTab('analytics')}
-              className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs sm:text-sm font-bold transition-colors duration-150 ${
-                activeTab === 'analytics'
-                  ? 'bg-[#19154E] text-[#FFF8FC]'
-                  : 'text-[#19154E] hover:bg-white/70'
-              }`}
-            >
-              <BarChart3 className="w-4 h-4 text-[#C8F904]" />
-              <span>Stats</span>
-            </button>
-            <button
-              onClick={() => setActiveTab('strategy')}
-              className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs sm:text-sm font-bold transition-colors duration-150 ${
-                activeTab === 'strategy'
-                  ? 'bg-[#19154E] text-[#FFF8FC]'
-                  : 'text-[#19154E] hover:bg-white/70'
-              }`}
-            >
-              <Sparkles className="w-4 h-4 text-[#B799E8]" />
-              <span>Strategy</span>
-            </button>
-            <button
-              onClick={() => setActiveTab('connect')}
-              className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs sm:text-sm font-bold transition-colors duration-150 ${
-                activeTab === 'connect'
-                  ? 'bg-[#19154E] text-[#FFF8FC]'
-                  : 'text-[#19154E] hover:bg-white/70'
-              }`}
-            >
-              <KeyRound className="w-4 h-4 text-[#A78BFA]" />
-              <span>Connect</span>
-              <span
-                className={`w-2.5 h-2.5 rounded-full border border-[#19154E] ${
-                  connectedPlatformIds.length > 0 ? 'bg-[#C8F904]' : 'bg-[#B799E8]'
-                }`}
-              />
-            </button>
-            <button
-              onClick={handleSignOut}
-              title={
-                currentUserEmail
-                  ? `Signed in as ${currentUserEmail} — click to sign out`
-                  : 'Sign Out'
-              }
-              className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold text-[#19154E] bg-white hover:bg-[#FFE4F1] border-2 border-[#19154E] transition-colors duration-150"
-            >
-              <LogOut className="w-3.5 h-3.5 text-[#FF7EB6]" />
-              <span>Sign Out</span>
-            </button>
-          </nav>
-        </div>
-      </header>
-
-      {/* Main Content Area */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-7 space-y-7">
-        {/* ============================================================
-            CARTOONY ANIMATED HERO STUDIO CARD (Clay + Upqode + Don't Look Up)
-        ============================================================ */}
-        <section className="editorial-card bg-gradient-to-br from-[#FFFDF9] via-[#FFF8FC] to-[#F5EEFF] p-6 sm:p-8 overflow-hidden">
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-center">
-            <div className="lg:col-span-8 space-y-4">
-              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-[#B799E8] border-2 border-[#19154E] text-xs font-bold uppercase tracking-wider">
-                <span>🧚‍♀️ Omnichannel Creator Hub</span>
-                <span>•</span>
-                <span>{connectedPlatformIds.length}/6 Platforms Connected</span>
-                <span>•</span>
-                <span>{automations.filter((a) => a.active).length} Active Flows</span>
-              </div>
-
-              <h2 className="font-display text-3xl sm:text-4xl lg:text-5xl font-bold text-[#19154E] leading-[1.06]">
-                Turn every social comment into an{' '}
-                <span className="inline-block px-3 py-0.5 rounded-2xl bg-[#C8F904] border-2 border-[#19154E] -rotate-1">
-                  instant reply
-                </span>{' '}
-                &amp; unified growth strategy.
-              </h2>
-
-              <p className="text-sm sm:text-base text-neutral-700 max-w-2xl leading-relaxed">
-                Connect <strong>Instagram</strong>, <strong>TikTok</strong>, <strong>YouTube</strong>,{' '}
-                <strong>Facebook</strong>, <strong>X</strong>, and <strong>Threads</strong> in one
-                hub. Pull live audience &amp; post telemetry and trigger automated keyword replies on{' '}
-                <strong>
-                  {selectedPlatform === 'all'
-                    ? connectedPlatformIds.length > 0
-                      ? `${connectedPlatformIds.length} connected channel(s)`
-                      : 'your social accounts'
-                    : profile.username
-                    ? `@${profile.username} (${activePlatformMeta?.name})`
-                    : `your ${activePlatformMeta?.name || 'social'} account`}
-                </strong>
-                .
-              </p>
-
-              {/* Quick Editorial Pill Counters */}
-              <div className="flex flex-wrap items-center gap-3 pt-1">
-                <div className="editorial-card-sm px-4 py-2 bg-white flex items-center gap-2.5">
-                  <span
-                    className={`w-3 h-3 rounded-full border border-[#19154E] ${
-                      isLiveSynced ? 'bg-emerald-400 animate-pulse' : 'bg-[#FF7EB6]'
-                    }`}
-                  />
-                  <span className="text-xs font-semibold text-neutral-600">
-                    Live {activeAudienceLabel}:
-                  </span>
-                  <span className="font-display font-bold text-sm">
-                    {(profile.followers_count || 0).toLocaleString()}
-                  </span>
-                </div>
-
-                <div className="editorial-card-sm px-4 py-2 bg-white flex items-center gap-2.5">
-                  <span className="w-3 h-3 rounded-full bg-[#C8F904] border border-[#19154E]" />
-                  <span className="text-xs font-semibold text-neutral-600">{activeContentLabel}:</span>
-                  <span className="font-display font-bold text-sm">
-                    {(profile.media_count || 0).toLocaleString()}
-                  </span>
-                </div>
-
-                <div className="editorial-card-sm px-4 py-2 bg-white flex items-center gap-2.5">
-                  <span className="w-3 h-3 rounded-full bg-[#FF7EB6] border border-[#19154E]" />
-                  <span className="text-xs font-semibold text-neutral-600">#1 Post Views:</span>
-                  <span className="font-display font-bold text-sm">
-                    {(topByViews.views || 0).toLocaleString()}
-                  </span>
-                </div>
-
-                <button
-                  onClick={() => setActiveTab('connect')}
-                  className="editorial-btn px-4 py-2 rounded-2xl bg-[#FF7EB6] text-[#19154E] text-xs font-bold flex items-center gap-1.5"
-                >
-                  <span>+ Connect Platforms</span>
-                  <ArrowUpRight className="w-4 h-4" />
-                </button>
-              </div>
-            </div>
-
-            {/* Animated Studio Mascot */}
-            <div className="lg:col-span-4 flex flex-col items-center justify-center">
-              <div
+      {/* ============================================================
+          TIER 1 (DESKTOP): PERSISTENT LEFT SIDEBAR RAIL
+      ============================================================ */}
+      <aside className="hidden lg:flex lg:w-60 xl:w-64 lg:flex-col lg:sticky lg:top-0 lg:h-screen bg-[#FFFDF9] border-r-2 border-[#19154E] shrink-0 justify-between p-4">
+        <div className="space-y-6">
+          <div className="flex items-center justify-between gap-2 px-1">
+            <div className="flex items-center gap-3 min-w-0">
+              <button
+                type="button"
                 onClick={triggerFairyWand}
-                title="Click mascot to cast a DM spell!"
-                className="w-60 h-60 sm:w-64 sm:h-64 cursor-pointer"
+                aria-label="Trigger studio mascot sparkle"
+                title="Tap mascot for a studio sparkle!"
+                className="w-11 h-11 rounded-2xl bg-[#FFF8FC] border-2 border-[#19154E] shadow-[2px_2px_0px_#19154E] overflow-hidden flex items-center justify-center shrink-0 hover:-translate-y-0.5 transition-transform"
               >
                 <TechFairyCharacter
                   isCasting={isCastingWand}
                   mood={isCastingWand ? 'excited' : 'happy'}
                 />
+              </button>
+              <div className="min-w-0">
+                <h1 className="font-display font-bold text-lg tracking-tight text-[#19154E] leading-tight">
+                  SocialAssist
+                </h1>
+                <a
+                  href="../index.html"
+                  className="text-[11px] font-bold text-neutral-500 hover:text-[#6D28D9] transition-colors inline-flex items-center gap-1"
+                  title="Return to TechFairyLab Home"
+                >
+                  <span>← TechFairyLab</span>
+                </a>
               </div>
-              <span className="text-[11px] font-bold text-neutral-500 uppercase tracking-wider">
-                ↑ Click studio mascot or test a trigger below!
-              </span>
             </div>
           </div>
-        </section>
 
-        {/* ============================================================
-            OMNICHANNEL PLATFORM SWITCHER BAR
-        ============================================================ */}
-        {['automations', 'analytics', 'strategy'].includes(activeTab) && (
-          <div className="editorial-card-sm p-3 bg-white flex flex-wrap items-center justify-between gap-2">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="text-xs font-bold text-[#19154E] px-2">Active Channel:</span>
-              <button
-                type="button"
-                data-testid="switch-platform-all"
-                onClick={() => {
-                  setSelectedPlatform('all');
-                  const snap = getActiveAnalyticsSnapshot(undefined, undefined, 'all');
-                  setOpenclawOutput(runLocalOpenClawAnalysis(openclawPrompt, snap));
-                }}
-                className={`px-3 py-1.5 rounded-xl text-xs font-bold border-2 border-[#19154E] inline-flex items-center gap-1.5 transition-colors duration-150 ${
-                  selectedPlatform === 'all'
-                    ? 'bg-[#19154E] text-[#FFF8FC]'
-                    : 'bg-[#FFF8FC] text-[#19154E] hover:bg-[#EDE9FE]'
-                }`}
-              >
-                <span>🌐 All Platforms</span>
-                <span className="text-[10px] px-1.5 py-0.2 rounded bg-[#C8F904] text-[#19154E] font-extrabold">
-                  {connectedPlatformIds.length}
-                </span>
-              </button>
+          <nav aria-label="Primary Workspace Navigation" className="space-y-1.5">
+            {navItems.map((item) => {
+              const Icon = item.icon;
+              const isActive = activeTab === item.id;
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  data-testid={`nav-${item.id}`}
+                  aria-current={isActive ? 'page' : undefined}
+                  onClick={() => setActiveTab(item.id)}
+                  className={`w-full flex items-center justify-between gap-2.5 px-3.5 py-2.5 rounded-xl text-sm font-bold transition-colors duration-150 ${
+                    isActive
+                      ? 'bg-[#19154E] text-[#FFF8FC] shadow-[3px_3px_0px_#FF7EB6]'
+                      : 'text-[#19154E] hover:bg-[#F5EEFF]'
+                  }`}
+                >
+                  <span className="flex items-center gap-2.5">
+                    <Icon className={`w-4 h-4 ${isActive ? item.accent : 'text-[#19154E]'}`} />
+                    <span>{item.label}</span>
+                  </span>
+                  {item.badge && (
+                    <span
+                      className={`text-[11px] tabular-nums px-2 py-0.5 rounded-full border font-extrabold ${
+                        isActive
+                          ? 'bg-[#C8F904] text-[#19154E] border-[#19154E]'
+                          : 'bg-[#F5EEFF] text-[#19154E] border-[#19154E]/40'
+                      }`}
+                    >
+                      {item.badge}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </nav>
+        </div>
 
-              {PLATFORMS.map((p) => {
-                const conn = connectionsMap[p.id];
-                const isSelected = selectedPlatform === p.id;
-                return (
-                  <button
-                    key={p.id}
-                    type="button"
-                    data-testid={`switch-platform-${p.id}`}
-                    onClick={() => {
-                      if (!conn?.handle) {
-                        handleSelectConnectPlatform(p.id);
-                        setActiveTab('connect');
-                        return;
-                      }
-                      setSelectedPlatform(p.id);
-                      const snap = getActiveAnalyticsSnapshot(undefined, undefined, p.id);
-                      setOpenclawOutput(runLocalOpenClawAnalysis(openclawPrompt, snap));
-                    }}
-                    className={`px-3 py-1.5 rounded-xl text-xs font-bold border-2 border-[#19154E] inline-flex items-center gap-1.5 transition-colors duration-150 ${
-                      isSelected
-                        ? 'bg-[#C8F904] text-[#19154E] shadow-[2px_2px_0px_#19154E]'
-                        : conn?.handle
-                        ? 'bg-white text-[#19154E] hover:bg-[#FFF8FC]'
-                        : 'bg-neutral-100 text-neutral-500 hover:bg-white hover:text-[#19154E]'
-                    }`}
-                    title={
-                      conn?.handle
-                        ? `View @${conn.handle} on ${p.name}`
-                        : `Click to connect ${p.name}`
-                    }
-                  >
-                    <PlatformIcon platform={p.id} className="w-3.5 h-3.5" />
-                    <span>{p.name}</span>
-                    {conn?.handle ? (
-                      <span className="text-[10px] font-mono-code opacity-80">@{conn.handle}</span>
-                    ) : (
-                      <span className="text-[10px] font-extrabold text-[#6D28D9]">+</span>
-                    )}
-                  </button>
-                );
-              })}
+        {/* Sidebar Account & Legal Footer */}
+        <div className="pt-4 border-t-2 border-neutral-200/80 space-y-2.5">
+          <div className="px-2 py-1.5 rounded-xl bg-[#F5EEFF]/70 border border-[#19154E]/20">
+            <div className="text-[11px] font-bold text-[#19154E] truncate">
+              {currentUsername || currentUserEmail || 'Creator Workspace'}
             </div>
-
+            {currentUserEmail && currentUsername && (
+              <div className="text-[10px] font-medium text-neutral-600 truncate">
+                {currentUserEmail}
+              </div>
+            )}
             <button
               type="button"
-              onClick={() => setActiveTab('connect')}
-              className="text-xs font-bold text-[#6D28D9] hover:underline px-2"
+              onClick={() => openPolicies('terms')}
+              className="mt-1 text-[10px] font-bold text-[#6D28D9] hover:underline"
             >
-              Manage Connections →
+              Terms &amp; Privacy
             </button>
           </div>
-        )}
 
-        {/* ============================================================
-            TAB 0: MULTI-PLATFORM CONTENT PLANNING CALENDAR
-        ============================================================ */}
-        {activeTab === 'planner' && (
-          <PlannerCalendar
-            scopedKey={scopedKey}
-            igHandle={
-              profile.username ||
-              connectionsMap?.instagram?.handle ||
-              connection?.instagram_handle ||
-              ''
+          <button
+            type="button"
+            onClick={handleSignOut}
+            title={
+              currentUserEmail
+                ? `Signed in as ${currentUserEmail} — click to sign out`
+                : 'Sign Out'
             }
-            igAccessToken={
-              loadSavedTokensMap()?.instagram ||
-              localStorage.getItem(scopedKey('sa_ig_access_token')) ||
-              ''
-            }
-            igAccountId={connection?.account_id || ''}
-            sharedTokensMap={loadSavedTokensMap()}
-            onCreateAutoDmFlow={handleCreatePlannerAutoDmFlow}
-            showToast={showToast}
-            triggerFairyWand={triggerFairyWand}
-          />
-        )}
+            className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-xl text-xs font-bold text-[#19154E] bg-white hover:bg-[#FFE4F1] border-2 border-[#19154E] transition-colors duration-150"
+          >
+            <LogOut className="w-3.5 h-3.5 text-[#FF7EB6]" />
+            <span>Sign Out</span>
+          </button>
+        </div>
+      </aside>
+
+      {/* ============================================================
+          TIER 1 (MOBILE / TABLET): COMPACT STICKY HEADER + TAB STRIP
+      ============================================================ */}
+      <header className="lg:hidden sticky top-0 z-30 bg-[#FFF8FC]/95 backdrop-blur-md border-b-2 border-[#19154E]">
+        <div className="px-4 h-14 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div className="w-8 h-8 rounded-xl bg-[#FF7EB6] border-2 border-[#19154E] flex items-center justify-center text-white shrink-0">
+              <PlatformIcon
+                platform={selectedPlatform === 'all' ? 'globe' : selectedPlatform}
+                className="w-4 h-4"
+              />
+            </div>
+            <span className="font-display font-bold text-lg text-[#19154E] truncate">
+              SocialAssist
+            </span>
+            <a
+              href="../index.html"
+              className="text-[11px] px-2 py-0.5 rounded-md bg-white border border-[#19154E] font-bold text-neutral-700"
+            >
+              ← Home
+            </a>
+          </div>
+
+          <div className="flex items-center gap-1.5">
+            {connectedPlatformIds.length > 0 && (
+              <button
+                type="button"
+                onClick={handleRefreshAnalytics}
+                disabled={syncing}
+                aria-label="Sync live stats"
+                className="p-2 rounded-xl bg-[#C8F904] border-2 border-[#19154E] text-[#19154E]"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${syncing ? 'animate-spin' : ''}`} />
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={handleSignOut}
+              aria-label="Sign Out"
+              className="px-2.5 py-1.5 rounded-xl text-xs font-bold bg-white border-2 border-[#19154E] text-[#19154E] inline-flex items-center gap-1"
+            >
+              <LogOut className="w-3.5 h-3.5 text-[#FF7EB6]" />
+              <span>Sign Out</span>
+            </button>
+          </div>
+        </div>
+
+        <nav
+          aria-label="Mobile Workspace Navigation"
+          className="px-3 pb-2.5 flex items-center gap-1.5 overflow-x-auto"
+        >
+          {navItems.map((item) => {
+            const Icon = item.icon;
+            const isActive = activeTab === item.id;
+            return (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => setActiveTab(item.id)}
+                className={`shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold border-2 border-[#19154E] transition-colors ${
+                  isActive ? 'bg-[#19154E] text-[#FFF8FC]' : 'bg-white text-[#19154E]'
+                }`}
+              >
+                <Icon className={`w-3.5 h-3.5 ${isActive ? item.accent : 'text-[#19154E]'}`} />
+                <span>{item.label}</span>
+                {item.badge && (
+                  <span className="text-[10px] tabular-nums opacity-85">({item.badge})</span>
+                )}
+              </button>
+            );
+          })}
+        </nav>
+      </header>
+
+      {/* ============================================================
+          RIGHT WORKSPACE COLUMN: GLOBAL CHANNEL BAR + MAIN CONTENT
+      ============================================================ */}
+      <div className="flex-1 min-w-0 flex flex-col">
+        {/* TIER 2: SINGLE GLOBAL CHANNEL FILTER & LIVE SYNC BAR */}
+        <div className="lg:sticky lg:top-0 z-20 bg-[#FFF8FC]/95 backdrop-blur-md border-b-2 border-[#19154E] px-4 sm:px-6 py-2.5">
+          <div className="max-w-6xl mx-auto flex flex-wrap items-center justify-between gap-2.5">
+            {activeTab !== 'connect' ? (
+              <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5 max-w-full">
+                <button
+                  type="button"
+                  data-testid="switch-platform-all"
+                  onClick={() => {
+                    setSelectedPlatform('all');
+                    const snap = getActiveAnalyticsSnapshot(undefined, undefined, 'all');
+                    setOpenclawOutput(runLocalOpenClawAnalysis(openclawPrompt, snap));
+                  }}
+                  className={`shrink-0 px-3 py-1.5 rounded-xl text-xs font-bold border-2 border-[#19154E] inline-flex items-center gap-1.5 transition-colors duration-150 ${
+                    selectedPlatform === 'all'
+                      ? 'bg-[#19154E] text-[#FFF8FC]'
+                      : 'bg-white text-[#19154E] hover:bg-[#EDE9FE]'
+                  }`}
+                >
+                  <span>🌐 All</span>
+                  <span className="text-[10px] tabular-nums px-1.5 py-0.2 rounded bg-[#C8F904] text-[#19154E] font-extrabold">
+                    {connectedPlatformIds.length}
+                  </span>
+                </button>
+
+                {PLATFORMS.map((p) => {
+                  const conn = connectionsMap[p.id];
+                  const isSelected = selectedPlatform === p.id;
+                  return (
+                    <button
+                      key={p.id}
+                      type="button"
+                      data-testid={`switch-platform-${p.id}`}
+                      onClick={() => {
+                        if (!conn?.handle) {
+                          handleSelectConnectPlatform(p.id);
+                          setActiveTab('connect');
+                          return;
+                        }
+                        setSelectedPlatform(p.id);
+                        const snap = getActiveAnalyticsSnapshot(undefined, undefined, p.id);
+                        setOpenclawOutput(runLocalOpenClawAnalysis(openclawPrompt, snap));
+                      }}
+                      className={`shrink-0 px-2.5 py-1.5 rounded-xl text-xs font-bold border-2 border-[#19154E] inline-flex items-center gap-1.5 transition-colors duration-150 ${
+                        isSelected
+                          ? 'bg-[#C8F904] text-[#19154E] shadow-[2px_2px_0px_#19154E]'
+                          : conn?.handle
+                          ? 'bg-white text-[#19154E] hover:bg-[#FFF8FC]'
+                          : 'bg-neutral-100/90 text-neutral-500 hover:bg-white hover:text-[#19154E]'
+                      }`}
+                      title={
+                        conn?.handle
+                          ? `Filter by @${conn.handle} on ${p.name}`
+                          : `Click to connect ${p.name}`
+                      }
+                    >
+                      <PlatformIcon platform={p.id} className="w-3.5 h-3.5" />
+                      <span>{p.name}</span>
+                      {conn?.handle ? (
+                        <span className="text-[10px] font-mono-code opacity-80 hidden sm:inline">
+                          @{conn.handle}
+                        </span>
+                      ) : (
+                        <span className="text-[10px] font-extrabold text-[#6D28D9]">+</span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="flex items-center gap-2 text-xs font-bold text-[#19154E]">
+                <ShieldCheck className="w-4 h-4 text-[#6D28D9]" />
+                <span>Account Connections</span>
+                <span className="text-neutral-400">•</span>
+                <span className="tabular-nums text-[#6D28D9]">
+                  {connectedPlatformIds.length} of 6 linked
+                </span>
+              </div>
+            )}
+
+            <div className="flex items-center gap-2.5 ml-auto">
+              <span
+                data-testid="signed-in-banner"
+                className="text-[11px] font-semibold text-neutral-600 truncate max-w-[220px]"
+              >
+                {currentUserEmail
+                  ? currentUsername
+                    ? `Signed in as ${currentUsername} (${currentUserEmail})`
+                    : `Signed in as ${currentUserEmail}`
+                  : 'Creator Workspace'}
+              </span>
+
+              {connectedPlatformIds.length > 0 && activeTab !== 'connect' && (
+                <button
+                  type="button"
+                  onClick={handleRefreshAnalytics}
+                  disabled={syncing}
+                  title={
+                    syncedTimeLabel
+                      ? `Last synced ${syncedTimeLabel} — click to refresh live metrics`
+                      : 'Refresh live metrics'
+                  }
+                  className="hidden lg:inline-flex editorial-btn px-3 py-1.5 rounded-xl bg-[#C8F904] text-[#19154E] text-xs font-bold items-center gap-1.5"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${syncing ? 'animate-spin' : ''}`} />
+                  <span className="tabular-nums">
+                    {syncing
+                      ? 'Syncing...'
+                      : syncedTimeLabel
+                      ? `Sync • ${syncedTimeLabel}`
+                      : 'Sync Live'}
+                  </span>
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Main Content Area */}
+        <main className="flex-1 max-w-6xl w-full mx-auto px-4 sm:px-6 py-5 sm:py-6 space-y-6">
+          {/* Compact Onboarding Callout ONLY when 0 accounts are connected */}
+          {connectedPlatformIds.length === 0 && activeTab !== 'connect' && (
+            <div className="editorial-card-sm p-4 bg-[#FFFDF9] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="text-xs sm:text-sm font-semibold text-[#19154E]">
+                <strong>No social channels connected yet.</strong> Link Instagram, TikTok, YouTube,
+                Facebook, X, or Threads to unlock live metrics and scheduling.
+              </div>
+              <button
+                type="button"
+                onClick={() => setActiveTab('connect')}
+                className="editorial-btn px-4 py-2 rounded-xl bg-[#C8F904] text-[#19154E] text-xs font-bold shrink-0"
+              >
+                Connect Account →
+              </button>
+            </div>
+          )}
+
+          {/* ============================================================
+              TAB 0: MULTI-PLATFORM CONTENT PLANNING CALENDAR
+          ============================================================ */}
+          {activeTab === 'planner' && (
+            <PlannerCalendar
+              scopedKey={scopedKey}
+              igHandle={
+                profile.username ||
+                connectionsMap?.instagram?.handle ||
+                connection?.instagram_handle ||
+                ''
+              }
+              igAccessToken={
+                loadSavedTokensMap()?.instagram ||
+                localStorage.getItem(scopedKey('sa_ig_access_token')) ||
+                ''
+              }
+              igAccountId={connectionsMap?.instagram?.account_id || connection?.account_id || ''}
+              activeChannel={selectedPlatform}
+              connectionsMap={connectionsMap}
+              sharedTokensMap={loadSavedTokensMap()}
+              oauthProviders={oauthProviders}
+              onOneClickConnect={handleOneClickOAuthConnect}
+              onNavigateConnect={(platId) => {
+                if (platId) handleSelectConnectPlatform(platId);
+                setActiveTab('connect');
+              }}
+              onCreateAutoDmFlow={handleCreatePlannerAutoDmFlow}
+              showToast={showToast}
+              triggerFairyWand={triggerFairyWand}
+            />
+          )}
 
         {/* ============================================================
             TAB 1: MANYCHAT-STYLE AUTOMATED DM STUDIO
@@ -2696,7 +2914,9 @@ export default function App() {
                             {flow.active ? '● LIVE' : 'PAUSED'}
                           </button>
                           <button
+                            type="button"
                             onClick={() => handleDeleteFlow(flow.id)}
+                            aria-label={`Delete ${flow.name} flow`}
                             className="p-1.5 rounded-xl border-2 border-transparent hover:border-[#19154E] text-neutral-500 hover:text-[#FF7EB6] transition-colors duration-150"
                             title="Delete flow"
                           >
@@ -2735,7 +2955,7 @@ export default function App() {
                       </div>
 
                       {/* Flow Metrics Footer */}
-                      <div className="mt-3.5 flex items-center gap-6 text-xs font-bold text-neutral-600">
+                      <div className="mt-3.5 flex items-center gap-6 text-xs font-bold text-neutral-600 tabular-nums">
                         <span>
                           Triggered: <strong className="text-[#19154E]">{flow.stats?.triggered || 0}</strong>
                         </span>
@@ -2921,26 +3141,21 @@ export default function App() {
         )}
 
         {/* ============================================================
-            TAB 2: INSTAGRAM STATISTICS & POST ANALYTICS
-            1) Best Performing Videos by Views & Followers Gained + Text Summaries
-            2) United States (US) Audience Activity Observatory
+            TAB 2: LIVE PERFORMANCE OVERVIEW & POST ANALYTICS
         ============================================================ */}
         {activeTab === 'analytics' && (
-          <div className="space-y-6 panel-enter">
-            {/* Astronomer Observatory Header Card */}
-            <div className="editorial-card p-6 bg-white grid grid-cols-1 lg:grid-cols-12 gap-6 items-center">
-              <div className="lg:col-span-8 space-y-3">
+          <div className="space-y-5 panel-enter">
+            {/* Compact Overview Header (KPIs immediately above the fold) */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
                 <div className="flex flex-wrap items-center gap-2">
-                  <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-[#EDE9FE] border-2 border-[#19154E] text-xs font-bold text-[#6D28D9]">
-                    <span>
-                      🔭{' '}
-                      {selectedPlatform === 'all'
-                        ? `Omnichannel Telemetry (${connectedPlatformIds.length} Connected)`
-                        : `@${profile.username || 'your_account'} Live ${activePlatformLabel} Telemetry`}
-                    </span>
-                  </div>
-                  <div
-                    className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full border-2 border-[#19154E] text-xs font-bold ${
+                  <h2 className="font-display text-2xl sm:text-3xl font-bold text-[#19154E]">
+                    {selectedPlatform === 'all'
+                      ? 'Omnichannel Overview'
+                      : `${activePlatformLabel} Overview`}
+                  </h2>
+                  <span
+                    className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full border border-[#19154E] text-[11px] font-bold ${
                       isLiveSynced ? 'bg-[#C8F904] text-[#19154E]' : 'bg-[#FFE4F1] text-[#19154E]'
                     }`}
                   >
@@ -2949,95 +3164,151 @@ export default function App() {
                         isLiveSynced ? 'bg-emerald-600 animate-pulse' : 'bg-amber-500'
                       }`}
                     />
-                    <span>
+                    <span className="tabular-nums">
                       {isGraphApiLive
-                        ? `Official ${activePlatformLabel} API Live`
+                        ? `Official ${activePlatformLabel} API`
                         : isLiveSynced
-                        ? `Live Synced (${activePlatformLabel})`
-                        : 'Connect an Account to Sync'}
-                      {syncedTimeLabel ? ` • Synced ${syncedTimeLabel}` : ''}
+                        ? 'Live Synced'
+                        : 'Awaiting Connection'}
+                      {syncedTimeLabel ? ` • ${syncedTimeLabel}` : ''}
                     </span>
-                  </div>
+                  </span>
                 </div>
-
-                <h3 className="font-display text-2xl sm:text-3xl font-bold text-[#19154E]">
-                  Live {activePlatformLabel} {activeContentLabel} by{' '}
-                  <span className="px-2.5 py-0.5 rounded-xl bg-[#FF7EB6] border-2 border-[#19154E]">
-                    Views, Likes &amp; Engagement
-                  </span>{' '}
-                  + US Active Windows
-                </h3>
-                <p className="text-xs sm:text-sm text-neutral-700 leading-relaxed">
-                  Pulling real-time {activeAudienceLabel.toLowerCase()}, post counts, and per-post
-                  views, likes, comments, and engagement rates directly from{' '}
-                  <strong>
-                    {selectedPlatform === 'all'
-                      ? 'all connected social accounts'
-                      : `@${profile.username || 'your_account'} on ${activePlatformLabel}`}
-                  </strong>
-                  . Auto-refreshes every 90s or click <strong>Sync Live Metrics</strong> anytime.
+                <p className="text-xs font-medium text-neutral-600 mt-0.5">
+                  {selectedPlatform === 'all'
+                    ? `Aggregated live followers, views, and engagement across ${connectedPlatformIds.length} connected channel(s).`
+                    : `Real-time ${activeAudienceLabel.toLowerCase()} and post metrics for @${profile.username || 'your_account'}.`}
                 </p>
-                <div className="pt-1 flex flex-wrap items-center gap-2.5">
-                  <button
-                    onClick={handleRefreshAnalytics}
-                    disabled={syncing}
-                    className="editorial-btn px-4 py-2 rounded-xl bg-[#C8F904] text-[#19154E] text-xs font-bold inline-flex items-center gap-2"
-                  >
-                    <RefreshCw className={`w-4 h-4 ${syncing ? 'animate-spin' : ''}`} />
-                    <span>
-                      {syncing
-                        ? `Syncing Live ${activePlatformLabel}...`
-                        : `Sync Live ${activePlatformLabel} Metrics`}
-                    </span>
-                  </button>
-                  <button
-                    onClick={() => {
-                      setActiveTab('strategy');
-                      handleRunOpenClaw();
-                    }}
-                    className="editorial-btn px-4 py-2 rounded-xl bg-[#FF7EB6] text-[#19154E] text-xs font-bold inline-flex items-center gap-2"
-                  >
-                    <span>🦞 Analyze Live Stats in OpenClaw</span>
-                    <ArrowUpRight className="w-4 h-4" />
-                  </button>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveTab('strategy');
+                  handleRunOpenClaw();
+                }}
+                className="editorial-btn px-3.5 py-2 rounded-xl bg-[#FF7EB6] text-[#19154E] text-xs font-bold inline-flex items-center gap-1.5 self-start sm:self-auto shrink-0"
+              >
+                <Sparkles className="w-3.5 h-3.5" />
+                <span>Analyze in AI Strategy</span>
+                <ArrowUpRight className="w-3.5 h-3.5" />
+              </button>
+            </div>
+
+            {/* 6 Bold Editorial Metric Cards — Live Multi-Platform Numbers */}
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3.5">
+              <div className="editorial-card-sm p-4 bg-white">
+                <div className="text-[11px] font-bold text-neutral-500 flex items-center justify-between">
+                  <span>LIVE {activeAudienceLabel.toUpperCase()}</span>
+                  <PlatformIcon
+                    platform={selectedPlatform === 'all' ? 'globe' : selectedPlatform}
+                    className="w-4 h-4 text-[#FF7EB6]"
+                  />
+                </div>
+                <div className="font-display text-2xl font-bold text-[#19154E] mt-1.5 tabular-nums">
+                  {(profile.followers_count || 0).toLocaleString()}
+                </div>
+                <div className="text-[11px] font-bold text-emerald-700 mt-1 tabular-nums">
+                  {(profile.media_count || 0).toLocaleString()} {activeContentLabel.toLowerCase()}
+                  {profile.follows_count ? ` • ${profile.follows_count} following` : ''}
                 </div>
               </div>
-              <div className="lg:col-span-4 flex justify-center">
-                <div className="w-60 h-44">
-                  <DataAstronomerCharacter />
+
+              <div className="editorial-card-sm p-4 bg-[#FF7EB6]">
+                <div className="text-[11px] font-bold text-[#19154E] flex items-center justify-between">
+                  <span>#1 POST VIEWS</span>
+                  <Eye className="w-4 h-4 text-[#19154E]" />
+                </div>
+                <div className="font-display text-2xl font-bold text-[#19154E] mt-1.5 tabular-nums">
+                  {(topByViews.views || 0).toLocaleString()}
+                </div>
+                <div className="text-[11px] font-bold text-[#19154E] mt-1 truncate tabular-nums">
+                  {(topByViews.likes || 0).toLocaleString()} likes • {(topByViews.comments || 0).toLocaleString()} comments
+                </div>
+              </div>
+
+              <div className="editorial-card-sm p-4 bg-white">
+                <div className="text-[11px] font-bold text-neutral-500 flex items-center justify-between">
+                  <span>TRACKED VIEWS</span>
+                  <TrendingUp className="w-4 h-4 text-[#6D28D9]" />
+                </div>
+                <div className="font-display text-2xl font-bold text-[#19154E] mt-1.5 tabular-nums">
+                  {(summary.total_views || 0).toLocaleString()}
+                </div>
+                <div className="text-[11px] font-bold text-emerald-700 mt-1 tabular-nums">
+                  Across {posts.length} synced items
+                </div>
+              </div>
+
+              <div className="editorial-card-sm p-4 bg-[#C8F904]">
+                <div className="text-[11px] font-bold text-[#19154E] flex items-center justify-between">
+                  <span>LIVE LIKES</span>
+                  <Sparkles className="w-4 h-4 text-[#19154E]" />
+                </div>
+                <div className="font-display text-2xl font-bold text-[#19154E] mt-1.5 tabular-nums">
+                  {(summary.total_likes || 0).toLocaleString()}
+                </div>
+                <div className="text-[11px] font-bold text-[#19154E] mt-1 tabular-nums">
+                  Avg {avgLikesPerPost.toLocaleString()} / post
+                </div>
+              </div>
+
+              <div className="editorial-card-sm p-4 bg-[#B799E8]">
+                <div className="text-[11px] font-bold text-[#19154E] flex items-center justify-between">
+                  <span>LIVE COMMENTS</span>
+                  <MessageCircle className="w-4 h-4 text-[#19154E]" />
+                </div>
+                <div className="font-display text-2xl font-bold text-[#19154E] mt-1.5 tabular-nums">
+                  {(summary.total_comments || 0).toLocaleString()}
+                </div>
+                <div className="text-[11px] font-bold text-[#19154E] mt-1 tabular-nums">
+                  Top: {(topByComments.comments || 0).toLocaleString()} comments
+                </div>
+              </div>
+
+              <div className="editorial-card-sm p-4 bg-white">
+                <div className="text-[11px] font-bold text-neutral-500 flex items-center justify-between">
+                  <span>AVG ENGAGEMENT</span>
+                  <Send className="w-4 h-4 text-[#FF7EB6]" />
+                </div>
+                <div className="font-display text-2xl font-bold text-[#6D28D9] mt-1.5 tabular-nums">
+                  {summary.avg_engagement_rate || 0}%
+                </div>
+                <div className="text-[11px] font-semibold text-neutral-600 mt-1 tabular-nums">
+                  {typeof summary.total_followers_gained === 'number'
+                    ? `+${summary.total_followers_gained.toLocaleString()} followers (API)`
+                    : `(Likes + Comments) ÷ Views`}
                 </div>
               </div>
             </div>
 
-            {/* Connected Platforms Breakdown Grid (All Platforms View) */}
+            {/* Connected Platforms Breakdown Grid (Clickable Cards — Zero Extra Buttons) */}
             {selectedPlatform === 'all' &&
               Array.isArray(analyticsData?.platform_breakdown) &&
               analyticsData.platform_breakdown.length > 0 && (
-                <div className="editorial-card p-5 bg-white space-y-3.5">
+                <div className="editorial-card p-5 bg-white space-y-3">
                   <div className="flex items-center justify-between">
-                    <h4 className="font-display font-bold text-base sm:text-lg text-[#19154E]">
-                      🌐 Connected Channels Breakdown ({analyticsData.platform_breakdown.length})
-                    </h4>
-                    <button
-                      type="button"
-                      onClick={() => setActiveTab('connect')}
-                      className="text-xs font-bold text-[#6D28D9] hover:underline"
-                    >
-                      + Connect Another Platform
-                    </button>
+                    <h3 className="font-display font-bold text-base sm:text-lg text-[#19154E] tabular-nums">
+                      Connected Channels ({analyticsData.platform_breakdown.length})
+                    </h3>
+                    <span className="text-[11px] font-semibold text-neutral-500">
+                      Click any channel to filter
+                    </span>
                   </div>
                   <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3.5">
                     {analyticsData.platform_breakdown.map((item) => {
                       const pMeta = PLATFORM_BY_ID[item.platform] || PLATFORM_BY_ID.instagram;
                       return (
-                        <div
+                        <button
                           key={item.platform}
-                          className="p-4 rounded-2xl bg-[#FFF8FC] border-2 border-[#19154E] flex flex-col justify-between gap-3"
+                          type="button"
+                          onClick={() => setSelectedPlatform(pMeta.id)}
+                          className="p-4 rounded-2xl bg-[#FFF8FC] hover:bg-white border-2 border-[#19154E] editorial-card-interactive text-left flex flex-col justify-between gap-3 group"
                         >
-                          <div className="flex items-center justify-between gap-2">
-                            <div className="flex items-center gap-2">
+                          <div className="flex items-center justify-between gap-2 w-full">
+                            <div className="flex items-center gap-2.5 min-w-0">
                               <span
-                                className="w-8 h-8 rounded-xl border-2 border-[#19154E] flex items-center justify-center"
+                                className="w-8 h-8 rounded-xl border-2 border-[#19154E] flex items-center justify-center shrink-0"
                                 style={{
                                   backgroundColor: pMeta.badgeBg,
                                   color: pMeta.badgeText,
@@ -3045,24 +3316,18 @@ export default function App() {
                               >
                                 <PlatformIcon platform={pMeta.id} className="w-4 h-4" />
                               </span>
-                              <div>
-                                <div className="font-display font-bold text-sm text-[#19154E]">
+                              <div className="min-w-0">
+                                <div className="font-display font-bold text-sm text-[#19154E] truncate">
                                   {pMeta.name}
                                 </div>
-                                <div className="text-xs font-mono-code font-bold text-[#6D28D9]">
+                                <div className="text-xs font-mono-code font-bold text-[#6D28D9] truncate">
                                   @{item.handle}
                                 </div>
                               </div>
                             </div>
-                            <button
-                              type="button"
-                              onClick={() => setSelectedPlatform(pMeta.id)}
-                              className="px-2.5 py-1 rounded-lg bg-[#C8F904] border border-[#19154E] text-[11px] font-bold text-[#19154E] hover:opacity-90"
-                            >
-                              View →
-                            </button>
+                            <ArrowUpRight className="w-4 h-4 text-neutral-400 group-hover:text-[#19154E] transition-colors shrink-0" />
                           </div>
-                          <div className="grid grid-cols-3 gap-2 pt-2 border-t border-neutral-200 text-center">
+                          <div className="grid grid-cols-3 gap-2 pt-2 border-t border-neutral-200 text-center w-full tabular-nums">
                             <div>
                               <div className="text-[10px] font-bold uppercase text-neutral-500">
                                 {pMeta.audienceLabel}
@@ -3073,7 +3338,7 @@ export default function App() {
                             </div>
                             <div>
                               <div className="text-[10px] font-bold uppercase text-neutral-500">
-                                Tracked Views
+                                Views
                               </div>
                               <div className="font-display font-bold text-sm text-[#19154E]">
                                 {(item.total_views || 0).toLocaleString()}
@@ -3088,181 +3353,60 @@ export default function App() {
                               </div>
                             </div>
                           </div>
-                        </div>
+                        </button>
                       );
                     })}
                   </div>
                 </div>
               )}
 
-            {/* 6 Bold Editorial Metric Cards — Live Multi-Platform Numbers */}
-            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">
-              <div className="editorial-card-sm p-4 bg-white">
-                <div className="text-xs font-bold text-neutral-500 flex items-center justify-between">
-                  <span>LIVE {activeAudienceLabel.toUpperCase()}</span>
-                  <PlatformIcon
-                    platform={selectedPlatform === 'all' ? 'globe' : selectedPlatform}
-                    className="w-4 h-4 text-[#FF7EB6]"
-                  />
-                </div>
-                <div className="font-display text-2xl font-bold text-[#19154E] mt-1.5">
-                  {(profile.followers_count || 0).toLocaleString()}
-                </div>
-                <div className="text-[11px] font-bold text-emerald-700 mt-1">
-                  {(profile.media_count || 0).toLocaleString()} {activeContentLabel.toLowerCase()}
-                  {profile.follows_count ? ` • ${profile.follows_count} following` : ''}
-                </div>
-              </div>
-
-              <div className="editorial-card-sm p-4 bg-[#FF7EB6]">
-                <div className="text-xs font-bold text-[#19154E] flex items-center justify-between">
-                  <span>#1 POST VIEWS</span>
-                  <Eye className="w-4 h-4 text-[#19154E]" />
-                </div>
-                <div className="font-display text-2xl font-bold text-[#19154E] mt-1.5">
-                  {(topByViews.views || 0).toLocaleString()}
-                </div>
-                <div className="text-[11px] font-bold text-[#19154E] mt-1 truncate">
-                  {(topByViews.likes || 0).toLocaleString()} Likes • {(topByViews.comments || 0).toLocaleString()} Comments
-                </div>
-              </div>
-
-              <div className="editorial-card-sm p-4 bg-white">
-                <div className="text-xs font-bold text-neutral-500 flex items-center justify-between">
-                  <span>TRACKED VIEWS</span>
-                  <TrendingUp className="w-4 h-4 text-[#6D28D9]" />
-                </div>
-                <div className="font-display text-2xl font-bold text-[#19154E] mt-1.5">
-                  {(summary.total_views || 0).toLocaleString()}
-                </div>
-                <div className="text-[11px] font-bold text-emerald-700 mt-1">
-                  Across {posts.length} synced items
-                </div>
-              </div>
-
-              <div className="editorial-card-sm p-4 bg-[#C8F904]">
-                <div className="text-xs font-bold text-[#19154E] flex items-center justify-between">
-                  <span>LIVE LIKES</span>
-                  <Sparkles className="w-4 h-4 text-[#19154E]" />
-                </div>
-                <div className="font-display text-2xl font-bold text-[#19154E] mt-1.5">
-                  {(summary.total_likes || 0).toLocaleString()}
-                </div>
-                <div className="text-[11px] font-bold text-[#19154E] mt-1">
-                  Avg {avgLikesPerPost.toLocaleString()} likes / post
-                </div>
-              </div>
-
-              <div className="editorial-card-sm p-4 bg-[#B799E8]">
-                <div className="text-xs font-bold text-[#19154E] flex items-center justify-between">
-                  <span>LIVE COMMENTS</span>
-                  <MessageCircle className="w-4 h-4 text-[#19154E]" />
-                </div>
-                <div className="font-display text-2xl font-bold text-[#19154E] mt-1.5">
-                  {(summary.total_comments || 0).toLocaleString()}
-                </div>
-                <div className="text-[11px] font-bold text-[#19154E] mt-1">
-                  Top Post: {(topByComments.comments || 0).toLocaleString()} comments
-                </div>
-              </div>
-
-              <div className="editorial-card-sm p-4 bg-white">
-                <div className="text-xs font-bold text-neutral-500 flex items-center justify-between">
-                  <span>AVG ENGAGEMENT</span>
-                  <Send className="w-4 h-4 text-[#FF7EB6]" />
-                </div>
-                <div className="font-display text-2xl font-bold text-[#6D28D9] mt-1.5">
-                  {summary.avg_engagement_rate || 0}%
-                </div>
-                <div className="text-[11px] font-semibold text-neutral-600 mt-1">
-                  {typeof summary.total_followers_gained === 'number'
-                    ? `+${summary.total_followers_gained.toLocaleString()} followers (API)`
-                    : `(Likes + Comments) ÷ Views`}
-                </div>
-              </div>
-            </div>
-
             {/* ============================================================
                 GOAL 1 & 2: LIVE POSTS / VIDEOS RANKING
-                & STRUCTURED TEXT SUMMARIES FOR OPENCLAW AGENT
+                & COMPACT COLLAPSIBLE AI SUMMARIES
             ============================================================ */}
             <div className="editorial-card bg-white overflow-hidden">
-              <div className="p-5 border-b-2 border-[#19154E] bg-[#F5EEFF] flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+              <div className="p-4 sm:p-5 border-b-2 border-[#19154E] bg-[#F5EEFF] flex flex-col lg:flex-row lg:items-center justify-between gap-3">
                 <div>
-                  <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-[#FF7EB6] border border-[#19154E] text-[11px] font-bold text-[#19154E] mb-1">
-                    <span>🎬 Live {activePlatformLabel} Performance &amp; Agent Text Summaries</span>
-                  </div>
                   <h3 className="font-display font-bold text-lg sm:text-xl text-[#19154E]">
                     {selectedPlatform === 'all'
-                      ? 'Top Synced Videos & Posts Across All Connected Platforms'
-                      : `Live ${activeContentLabel} on @${profile.username || 'your_account'} (${activePlatformLabel})`}
+                      ? 'Top Synced Videos & Posts'
+                      : `Top ${activeContentLabel} on @${profile.username || 'your_account'}`}
                   </h3>
-                  <p className="text-xs font-medium text-neutral-700">
-                    Live views, likes, comments, and engagement rates pulled directly from {activePlatformLabel}, paired with structured summaries for OpenClaw.
+                  <p className="text-xs font-medium text-neutral-600">
+                    Ranked by live {activePlatformLabel} telemetry with 1-click AI Strategy handoff.
                   </p>
                 </div>
 
-                {/* Sort Selector Buttons */}
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-xs font-bold text-[#19154E]">Rank By:</span>
-                  <button
-                    onClick={() => setVideoSortBy('views')}
-                    className={`px-3 py-1.5 rounded-xl text-xs font-bold border-2 border-[#19154E] transition-colors duration-150 ${
-                      videoSortBy === 'views'
-                        ? 'bg-[#C8F904] text-[#19154E]'
-                        : 'bg-white text-[#19154E] hover:bg-[#FFF8FC]'
-                    }`}
-                  >
-                    👁️ Live Views
-                  </button>
-                  <button
-                    onClick={() => setVideoSortBy('likes')}
-                    className={`px-3 py-1.5 rounded-xl text-xs font-bold border-2 border-[#19154E] transition-colors duration-150 ${
-                      videoSortBy === 'likes'
-                        ? 'bg-[#FF7EB6] text-[#19154E]'
-                        : 'bg-white text-[#19154E] hover:bg-[#FFF8FC]'
-                    }`}
-                  >
-                    ❤️ Live Likes
-                  </button>
-                  <button
-                    onClick={() => setVideoSortBy('engagement')}
-                    className={`px-3 py-1.5 rounded-xl text-xs font-bold border-2 border-[#19154E] transition-colors duration-150 ${
-                      videoSortBy === 'engagement'
-                        ? 'bg-[#B799E8] text-[#19154E]'
-                        : 'bg-white text-[#19154E] hover:bg-[#FFF8FC]'
-                    }`}
-                  >
-                    ⚡ Engagement %
-                  </button>
-                  <button
-                    onClick={() => setVideoSortBy('recent')}
-                    className={`px-3 py-1.5 rounded-xl text-xs font-bold border-2 border-[#19154E] transition-colors duration-150 ${
-                      videoSortBy === 'recent'
-                        ? 'bg-[#19154E] text-[#FFF8FC]'
-                        : 'bg-white text-[#19154E] hover:bg-[#FFF8FC]'
-                    }`}
-                  >
-                    🕒 Newest
-                  </button>
-                  {hasFollowerInsights && (
+                {/* Sort Selector Segmented Control */}
+                <div className="inline-flex flex-wrap items-center gap-1 bg-white p-1 rounded-xl border-2 border-[#19154E]">
+                  {[
+                    { id: 'views', label: 'Views', activeBg: 'bg-[#C8F904] text-[#19154E]' },
+                    { id: 'likes', label: 'Likes', activeBg: 'bg-[#FF7EB6] text-[#19154E]' },
+                    { id: 'engagement', label: 'Engagement %', activeBg: 'bg-[#B799E8] text-[#19154E]' },
+                    { id: 'recent', label: 'Newest', activeBg: 'bg-[#19154E] text-[#FFF8FC]' },
+                    ...(hasFollowerInsights
+                      ? [{ id: 'followers', label: '+Followers', activeBg: 'bg-[#FF7EB6] text-[#19154E]' }]
+                      : []),
+                  ].map((opt) => (
                     <button
-                      onClick={() => setVideoSortBy('followers')}
-                      className={`px-3 py-1.5 rounded-xl text-xs font-bold border-2 border-[#19154E] transition-colors duration-150 ${
-                        videoSortBy === 'followers'
-                          ? 'bg-[#FF7EB6] text-[#19154E]'
-                          : 'bg-white text-[#19154E] hover:bg-[#FFF8FC]'
+                      key={opt.id}
+                      type="button"
+                      onClick={() => setVideoSortBy(opt.id)}
+                      className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-colors duration-150 ${
+                        videoSortBy === opt.id
+                          ? opt.activeBg
+                          : 'text-[#19154E] hover:bg-[#F5EEFF]'
                       }`}
                     >
-                      🏆 Followers Gained
+                      {opt.label}
                     </button>
-                  )}
+                  ))}
                 </div>
               </div>
 
-              <div className="p-5 space-y-4">
+              <div className="p-4 sm:p-5 space-y-3.5">
                 {sortedPosts.length === 0 ? (
-                  <div className="p-8 text-center rounded-2xl bg-[#FFF8FC] border-2 border-dashed border-[#19154E] space-y-3">
+                  <div className="p-8 text-center rounded-2xl bg-[#FFF8FC] border-2 border-dashed border-[#19154E]/40 space-y-2">
                     <p className="font-display font-bold text-base text-[#19154E]">
                       {isUnconnected
                         ? 'No social accounts connected yet.'
@@ -3270,8 +3414,8 @@ export default function App() {
                     </p>
                     <p className="text-xs text-neutral-600 font-medium max-w-xl mx-auto">
                       {isUnconnected
-                        ? 'Connect Instagram, TikTok, YouTube, Facebook, X, or Threads to pull live audience and post stats into your isolated workspace.'
-                        : 'Public profile counts are live! Add an optional developer API token in Connect → Advanced Settings if this platform restricts individual post timelines.'}
+                        ? 'Select Connections in the sidebar to link Instagram, TikTok, YouTube, Facebook, X, or Threads.'
+                        : 'Public profile counts are live. Optional developer API tokens can be added in Connections → Advanced Setup if this platform restricts individual post feeds.'}
                     </p>
                   </div>
                 ) : (
@@ -3280,14 +3424,14 @@ export default function App() {
                     return (
                       <div
                         key={`${post.platform}-${post.id}`}
-                        className={`rounded-2xl border-2 border-[#19154E] p-4 sm:p-5 transition-colors duration-150 ${
+                        className={`rounded-2xl border-2 border-[#19154E] p-4 transition-colors duration-150 ${
                           idx === 0
                             ? 'bg-gradient-to-r from-[#FFF8FC] via-[#FFFDF9] to-[#F5EEFF] shadow-[4px_4px_0px_#19154E]'
                             : 'bg-white'
                         }`}
                       >
-                        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 border-b-2 border-dashed border-neutral-200 pb-3.5">
-                          <div className="flex items-start gap-3.5">
+                        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                          <div className="flex items-start gap-3.5 min-w-0">
                             {post.thumbnail_url && (
                               <a
                                 href={post.permalink}
@@ -3309,17 +3453,17 @@ export default function App() {
                                       e.currentTarget.src = post.fallback_thumbnail_url;
                                     }
                                   }}
-                                  className="w-20 h-28 sm:w-24 sm:h-32 rounded-xl border-2 border-[#19154E] object-cover shadow-[2px_2px_0px_#19154E] bg-[#19154E] group-hover:scale-[1.02] transition-transform duration-150"
+                                  className="w-16 h-24 sm:w-20 sm:h-28 rounded-xl border-2 border-[#19154E] object-cover shadow-[2px_2px_0px_#19154E] bg-[#19154E] group-hover:scale-[1.02] transition-transform duration-150"
                                 />
-                                <span className="absolute bottom-1 left-1 right-1 text-center text-[9px] font-extrabold px-1 py-0.5 rounded bg-[#19154E]/90 text-[#C8F904]">
+                                <span className="absolute bottom-1 left-1 right-1 text-center text-[9px] tabular-nums font-extrabold px-1 py-0.5 rounded bg-[#19154E]/90 text-[#C8F904]">
                                   ▶ {(post.views || 0).toLocaleString()}
                                 </span>
                               </a>
                             )}
-                            <div className="space-y-1">
-                              <div className="flex items-center gap-2 flex-wrap">
+                            <div className="space-y-1 min-w-0">
+                              <div className="flex items-center gap-1.5 flex-wrap">
                                 <span
-                                  className={`text-xs font-extrabold px-2.5 py-0.5 rounded-lg border-2 border-[#19154E] ${
+                                  className={`text-[11px] font-extrabold px-2 py-0.5 rounded-md border border-[#19154E] tabular-nums ${
                                     idx === 0
                                       ? 'bg-[#C8F904] text-[#19154E]'
                                       : idx === 1
@@ -3329,68 +3473,56 @@ export default function App() {
                                       : 'bg-neutral-100 text-[#19154E]'
                                   }`}
                                 >
-                                  #{idx + 1}{' '}
-                                  {idx === 0 ? 'TOP PERFORMER' : idx < 3 ? 'HIGH PERFORMER' : 'LIVE POST'}
+                                  #{idx + 1}
                                 </span>
                                 <span
-                                  className="text-[11px] font-extrabold px-2.5 py-0.5 rounded-lg border border-[#19154E] inline-flex items-center gap-1"
+                                  className="text-[11px] font-extrabold px-2 py-0.5 rounded-md border border-[#19154E] inline-flex items-center gap-1"
                                   style={{
                                     backgroundColor: pMeta.badgeBg,
                                     color: pMeta.badgeText,
                                   }}
                                 >
                                   <PlatformIcon platform={pMeta.id} className="w-3 h-3" />
-                                  <span>{pMeta.name.toUpperCase()}</span>
+                                  <span>{pMeta.name}</span>
                                 </span>
-                                <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-lg border border-[#19154E] bg-[#EDE9FE] text-[#6D28D9]">
+                                <span className="text-[11px] font-semibold text-neutral-500">
                                   {post.type || 'POST'} • {post.published_label}
                                   {post.duration_sec ? ` • ${post.duration_sec}s` : ''}
                                 </span>
                                 {post.best_keyword && !post.best_keyword.includes('None') && (
-                                  <span className="font-mono-code text-[11px] font-bold px-2.5 py-0.5 rounded-lg bg-[#C8F904] text-[#19154E] border border-[#19154E]">
-                                    Trigger: &quot;{post.best_keyword}&quot;
+                                  <span className="font-mono-code text-[10px] font-bold px-2 py-0.5 rounded-md bg-[#C8F904] text-[#19154E] border border-[#19154E]">
+                                    Keyword: &quot;{post.best_keyword}&quot;
                                   </span>
                                 )}
-                                {post.permalink && (
-                                  <a
-                                    href={post.permalink}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                    className="text-[11px] font-bold px-2.5 py-0.5 rounded-lg bg-white border border-[#19154E] text-[#19154E] hover:bg-[#C8F904] inline-flex items-center gap-1 transition-colors duration-150"
-                                  >
-                                    <span>{pMeta.name}</span>
-                                    <ExternalLink className="w-3 h-3" />
-                                  </a>
-                                )}
                               </div>
-                              <h4 className="font-display font-bold text-base sm:text-lg text-[#19154E]">
+                              <h4 className="font-display font-bold text-sm sm:text-base text-[#19154E] line-clamp-1">
                                 {post.title}
                               </h4>
                               <p className="text-xs text-neutral-600 line-clamp-2">{post.caption}</p>
                             </div>
                           </div>
 
-                          {/* Key Live Performance Badges */}
-                          <div className="flex flex-wrap items-center gap-2.5 shrink-0">
-                            <div className="px-3.5 py-2 rounded-xl bg-[#C8F904] border-2 border-[#19154E] text-center">
+                          {/* Single Non-Duplicated Set of Live Performance Badges */}
+                          <div className="flex flex-wrap items-center gap-2 shrink-0 tabular-nums">
+                            <div className="px-3 py-1.5 rounded-xl bg-[#C8F904] border-2 border-[#19154E] text-center min-w-[72px]">
                               <div className="text-[10px] font-extrabold uppercase text-[#19154E]">
-                                Live Views
+                                Views
                               </div>
-                              <div className="font-display font-bold text-base text-[#19154E]">
+                              <div className="font-display font-bold text-sm text-[#19154E]">
                                 {(post.views || 0).toLocaleString()}
                               </div>
                             </div>
 
-                            <div className="px-3.5 py-2 rounded-xl bg-[#FF7EB6] border-2 border-[#19154E] text-center">
+                            <div className="px-3 py-1.5 rounded-xl bg-[#FF7EB6] border-2 border-[#19154E] text-center min-w-[68px]">
                               <div className="text-[10px] font-extrabold uppercase text-[#19154E]">
-                                Live Likes
+                                Likes
                               </div>
-                              <div className="font-display font-bold text-base text-[#19154E]">
+                              <div className="font-display font-bold text-sm text-[#19154E]">
                                 {(post.likes || 0).toLocaleString()}
                               </div>
                             </div>
 
-                            <div className="px-3 py-2 rounded-xl bg-[#F5EEFF] border-2 border-[#19154E] text-center">
+                            <div className="px-2.5 py-1.5 rounded-xl bg-[#F5EEFF] border-2 border-[#19154E] text-center min-w-[68px]">
                               <div className="text-[10px] font-bold uppercase text-[#6D28D9]">
                                 Comments
                               </div>
@@ -3399,9 +3531,9 @@ export default function App() {
                               </div>
                             </div>
 
-                            <div className="px-3 py-2 rounded-xl bg-white border-2 border-[#19154E] text-center">
+                            <div className="px-2.5 py-1.5 rounded-xl bg-white border-2 border-[#19154E] text-center min-w-[64px]">
                               <div className="text-[10px] font-bold uppercase text-neutral-500">
-                                Eng. Rate
+                                Eng. %
                               </div>
                               <div className="font-display font-bold text-sm text-[#19154E]">
                                 {post.engagement_rate}%
@@ -3409,7 +3541,7 @@ export default function App() {
                             </div>
 
                             {typeof post.followers_gained === 'number' && (
-                              <div className="px-3 py-2 rounded-xl bg-[#EDE9FE] border-2 border-[#19154E] text-center">
+                              <div className="px-2.5 py-1.5 rounded-xl bg-[#EDE9FE] border-2 border-[#19154E] text-center">
                                 <div className="text-[10px] font-bold uppercase text-[#6D28D9]">
                                   +Followers
                                 </div>
@@ -3421,63 +3553,69 @@ export default function App() {
                           </div>
                         </div>
 
-                        {/* Structured Text Summary Box for Agent Analysis */}
-                        <div className="mt-3.5 p-3.5 rounded-xl bg-[#FFF8FC] border-2 border-[#19154E] space-y-2">
-                          <div className="flex flex-wrap items-center justify-between gap-2">
-                            <span className="text-[11px] font-extrabold uppercase tracking-wider text-[#6D28D9] flex items-center gap-1.5">
-                              <span>📝 Post Summary &amp; Live Metrics (For AI Agent Analysis)</span>
-                            </span>
-                            <div className="flex items-center gap-2">
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  copyToClipboard(
-                                    `[${pMeta.name}] ${post.title}\nPermalink: ${post.permalink}\nLive Views: ${(post.views || 0).toLocaleString()} | Live Likes: ${(post.likes || 0).toLocaleString()} | Live Comments: ${(post.comments || 0).toLocaleString()} | ER: ${post.engagement_rate}%\nSummary: ${post.video_summary_text}`,
-                                    `summary-${post.id}`
-                                  )
-                                }
-                                className="px-2.5 py-1 rounded-lg bg-white border border-[#19154E] text-[11px] font-bold text-[#19154E] hover:bg-[#EDE9FE] inline-flex items-center gap-1"
+                        {/* Progressive Disclosure Footer: AI Summary + Single Action Strip */}
+                        <div className="mt-3 pt-2.5 border-t border-neutral-200 flex flex-col sm:flex-row sm:items-start justify-between gap-2">
+                          <details open={idx === 0} className="flex-1 min-w-0 group">
+                            <summary className="cursor-pointer select-none text-[11px] font-bold text-[#6D28D9] hover:text-[#19154E] inline-flex items-center gap-1">
+                              <span>📝 AI Post Summary</span>
+                              <span className="text-neutral-400 group-open:rotate-90 transition-transform">›</span>
+                            </summary>
+                            <p className="mt-1.5 text-xs text-[#19154E] font-medium leading-relaxed bg-[#FFF8FC] p-2.5 rounded-xl border border-[#19154E]/30">
+                              {post.video_summary_text}
+                            </p>
+                          </details>
+
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                copyToClipboard(
+                                  `[${pMeta.name}] ${post.title}\nPermalink: ${post.permalink}\nViews: ${(post.views || 0).toLocaleString()} | Likes: ${(post.likes || 0).toLocaleString()} | Comments: ${(post.comments || 0).toLocaleString()} | ER: ${post.engagement_rate}%\nSummary: ${post.video_summary_text}`,
+                                  `summary-${post.id}`
+                                )
+                              }
+                              aria-label="Copy post summary"
+                              title="Copy post summary"
+                              className="px-2.5 py-1 rounded-lg bg-white border border-[#19154E] text-[11px] font-bold text-[#19154E] hover:bg-[#EDE9FE] inline-flex items-center gap-1"
+                            >
+                              {copiedField === `summary-${post.id}` ? (
+                                <>
+                                  <Check className="w-3 h-3 text-emerald-700" />
+                                  <span>Copied</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Copy className="w-3 h-3" />
+                                  <span>Copy</span>
+                                </>
+                              )}
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const customP = `Analyze this live ${pMeta.name} post "${post.title}" (${(post.views || 0).toLocaleString()} live views, ${(post.likes || 0).toLocaleString()} likes, ${(post.comments || 0).toLocaleString()} comments, ${post.engagement_rate}% engagement rate): ${post.video_summary_text} — Why did it perform this way and how can I replicate or repurpose it across my other platforms for my US audience?`;
+                                setActiveTab('strategy');
+                                handleRunOpenClaw(customP);
+                              }}
+                              className="px-2.5 py-1 rounded-lg bg-[#19154E] text-[#FFF8FC] text-[11px] font-bold hover:bg-[#6D28D9] inline-flex items-center gap-1"
+                            >
+                              <Sparkles className="w-3 h-3 text-[#C8F904]" />
+                              <span>Analyze</span>
+                            </button>
+
+                            {post.permalink && !post.thumbnail_url && (
+                              <a
+                                href={post.permalink}
+                                target="_blank"
+                                rel="noreferrer"
+                                aria-label={`Open post on ${pMeta.name}`}
+                                className="px-2 py-1 rounded-lg bg-white border border-[#19154E] text-[11px] font-bold text-[#19154E] hover:bg-[#C8F904] inline-flex items-center gap-1"
                               >
-                                {copiedField === `summary-${post.id}` ? (
-                                  <>
-                                    <Check className="w-3 h-3 text-emerald-700" />
-                                    <span>Copied!</span>
-                                  </>
-                                ) : (
-                                  <>
-                                    <Copy className="w-3 h-3" />
-                                    <span>Copy Summary</span>
-                                  </>
-                                )}
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  const customP = `Analyze this live ${pMeta.name} post "${post.title}" (${(post.views || 0).toLocaleString()} live views, ${(post.likes || 0).toLocaleString()} likes, ${(post.comments || 0).toLocaleString()} comments, ${post.engagement_rate}% engagement rate): ${post.video_summary_text} — Why did it perform this way and how can I replicate or repurpose it across my other platforms for my US audience?`;
-                                  setActiveTab('strategy');
-                                  handleRunOpenClaw(customP);
-                                }}
-                                className="px-2.5 py-1 rounded-lg bg-[#19154E] text-[#FFF8FC] text-[11px] font-bold hover:bg-[#6D28D9] inline-flex items-center gap-1"
-                              >
-                                <span>🦞 Send to OpenClaw Agent</span>
-                              </button>
-                            </div>
-                          </div>
-                          <p className="text-xs text-[#19154E] font-medium leading-relaxed">
-                            {post.video_summary_text}
-                          </p>
-                          <div className="pt-1 flex flex-wrap items-center gap-4 text-[11px] font-bold text-neutral-600">
-                            <span>👁️ Views: {(post.views || 0).toLocaleString()}</span>
-                            <span>❤️ Likes: {(post.likes || 0).toLocaleString()}</span>
-                            <span>💬 Comments: {(post.comments || 0).toLocaleString()}</span>
-                            {typeof post.saves === 'number' && (
-                              <span>📌 Saves: {post.saves.toLocaleString()}</span>
+                                <span>Open</span>
+                                <ExternalLink className="w-3 h-3" />
+                              </a>
                             )}
-                            {typeof post.shares === 'number' && (
-                              <span>🔁 Shares: {post.shares.toLocaleString()}</span>
-                            )}
-                            {post.PostingHour && <span>🕒 Posted: {post.PostingHour}</span>}
-                            <span>⚡ Eng. Rate: {post.engagement_rate}%</span>
                           </div>
                         </div>
                       </div>
@@ -3729,24 +3867,20 @@ export default function App() {
                 OPENCLAW AGENT HOOKUP & VIDEO SUMMARY ANALYZER
             ============================================================ */}
             <div className="editorial-card bg-white overflow-hidden">
-              <div className="p-5 sm:p-6 border-b-2 border-[#19154E] bg-gradient-to-r from-[#FF7EB6]/30 via-[#F5EEFF] to-[#FFF8FC] flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+              <div className="p-5 sm:p-6 border-b-2 border-[#19154E] bg-gradient-to-r from-[#FF7EB6]/25 via-[#F5EEFF] to-[#FFF8FC] flex flex-col lg:flex-row lg:items-center justify-between gap-4">
                 <div className="space-y-1">
-                  <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-[#19154E] text-[#FFF8FC] text-xs font-bold">
-                    <span>🦞 OpenClaw Agent Hookup</span>
+                  <div className="inline-flex items-center gap-2 px-2.5 py-0.5 rounded-full bg-[#19154E] text-[#FFF8FC] text-[11px] font-bold">
+                    <span>🦞 OpenClaw AI Strategy</span>
                     <span>•</span>
                     <span className="text-[#C8F904]">
-                      {openclawStatus === 'connected_gateway'
-                        ? 'Connected to Live OpenClaw Gateway'
-                        : 'OpenClaw Video Analyzer Ready'}
+                      {openclawStatus === 'connected_gateway' ? 'Live Gateway' : 'Ready'}
                     </span>
                   </div>
-                  <h3 className="font-display text-2xl sm:text-3xl font-bold text-[#19154E]">
-                    OpenClaw Video Summary Analyzer &amp; Agent Hub
-                  </h3>
-                  <p className="text-xs sm:text-sm text-neutral-700 max-w-3xl">
-                    Your top-performing videos (by Views &amp; Followers Gained) and US audience activity
-                    are automatically summarized into a structured text brief so your{' '}
-                    <strong>OpenClaw Agent</strong> can analyze them right here on the site.
+                  <h2 className="font-display text-2xl font-bold text-[#19154E]">
+                    AI Video Analyzer &amp; Growth Playbook
+                  </h2>
+                  <p className="text-xs text-neutral-600 max-w-2xl">
+                    Analyzes your synced top posts and US audience scroll windows to generate next-post hooks and keyword DM triggers.
                   </p>
                 </div>
 
@@ -3754,88 +3888,38 @@ export default function App() {
                   <button
                     type="button"
                     onClick={() => setShowBriefPreview(!showBriefPreview)}
-                    className="editorial-btn px-3.5 py-2 rounded-xl bg-white text-[#19154E] text-xs font-bold"
+                    className="editorial-btn px-3 py-1.5 rounded-xl bg-white text-[#19154E] text-xs font-bold"
                   >
-                    {showBriefPreview ? 'Hide Text Brief' : '📄 View Compiled Video Brief'}
+                    {showBriefPreview ? 'Hide Data Brief' : '📄 View Data Brief'}
                   </button>
                   <button
                     type="button"
                     onClick={() => copyToClipboard(openclawBrief, 'openclaw-brief')}
-                    className="editorial-btn px-3.5 py-2 rounded-xl bg-[#C8F904] text-[#19154E] text-xs font-bold inline-flex items-center gap-1.5"
+                    className="editorial-btn px-3 py-1.5 rounded-xl bg-[#C8F904] text-[#19154E] text-xs font-bold inline-flex items-center gap-1.5"
                   >
                     {copiedField === 'openclaw-brief' ? (
                       <>
                         <Check className="w-3.5 h-3.5" />
-                        <span>Brief Copied!</span>
+                        <span>Copied!</span>
                       </>
                     ) : (
                       <>
                         <Copy className="w-3.5 h-3.5" />
-                        <span>Copy Brief for Agent</span>
+                        <span>Copy Brief</span>
                       </>
                     )}
                   </button>
                 </div>
               </div>
 
-              <div className="p-5 sm:p-6 space-y-5">
-                {/* OpenClaw Gateway Endpoint & Context Feed Bar */}
-                <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 p-4 rounded-2xl bg-[#FFF8FC] border-2 border-[#19154E]">
-                  <div className="lg:col-span-6">
-                    <label className="block text-[11px] font-extrabold uppercase text-[#19154E] mb-1">
-                      🦞 OpenClaw Gateway / Agent Endpoint URL
-                    </label>
-                    <input
-                      type="text"
-                      value={openclawGatewayUrl}
-                      onChange={(e) => setOpenclawGatewayUrl(e.target.value)}
-                      placeholder="http://localhost:18789/v1/chat/completions"
-                      className="w-full px-3 py-2 rounded-xl bg-white border-2 border-[#19154E] text-xs font-mono-code font-bold text-[#6D28D9]"
-                    />
-                  </div>
-                  <div className="lg:col-span-6">
-                    <label className="block text-[11px] font-extrabold uppercase text-[#19154E] mb-1">
-                      📡 Live Instagram Telemetry Feed URL (For External OpenClaw Skills)
-                    </label>
-                    <div className="flex gap-2">
-                      <input
-                        type="text"
-                        readOnly
-                        value={`${typeof window !== 'undefined' ? window.location.origin : 'https://www.techfairylab.com'}/api/analytics`}
-                        className="flex-1 px-3 py-2 rounded-xl bg-white border-2 border-[#19154E] text-xs font-mono-code font-bold text-[#19154E]"
-                      />
-                      <button
-                        type="button"
-                        onClick={() =>
-                          copyToClipboard(
-                            `${typeof window !== 'undefined' ? window.location.origin : 'https://www.techfairylab.com'}/api/analytics`,
-                            'brief-url'
-                          )
-                        }
-                        className="px-3 py-2 rounded-xl bg-[#EDE9FE] border-2 border-[#19154E] text-xs font-bold text-[#19154E]"
-                      >
-                        {copiedField === 'brief-url' ? 'Copied!' : 'Copy URL'}
-                      </button>
-                    </div>
-                  </div>
-                </div>
-
+              <div className="p-5 sm:p-6 space-y-4">
                 {/* Optional Collapsible Raw Text Brief */}
                 {showBriefPreview && (
-                  <div className="p-4 rounded-2xl bg-[#19154E] text-[#FFF8FC] border-2 border-[#19154E] space-y-2">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold text-[#C8F904]">
-                        Compiled Live Instagram Metrics + US Active Hours Brief (Auto-fed to OpenClaw):
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => copyToClipboard(openclawBrief, 'openclaw-brief-inner')}
-                        className="text-xs font-bold text-[#FF7EB6] underline"
-                      >
-                        {copiedField === 'openclaw-brief-inner' ? 'Copied!' : 'Copy All Text'}
-                      </button>
+                  <div className="p-4 rounded-2xl bg-[#19154E] text-[#FFF8FC] border-2 border-[#19154E] space-y-1.5">
+                    <div className="text-xs font-bold text-[#C8F904]">
+                      Compiled Live Telemetry + US Active Hours Brief:
                     </div>
-                    <pre className="text-[11px] font-mono-code whitespace-pre-wrap leading-relaxed max-h-64 overflow-y-auto text-neutral-200">
+                    <pre className="text-[11px] font-mono-code whitespace-pre-wrap leading-relaxed max-h-56 overflow-y-auto text-neutral-200">
                       {openclawBrief}
                     </pre>
                   </div>
@@ -3843,20 +3927,29 @@ export default function App() {
 
                 {/* Agent Prompt & Quick Task Pills */}
                 <div className="space-y-3">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-xs font-bold text-[#19154E]">Quick Agent Tasks:</span>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-xs font-bold text-[#19154E] mr-1">Prompts:</span>
                     {[
-                      'Compare my top 3 live Reels by Views & Engagement Rate and write 3 new Reel scripts',
-                      'Why did my #1 live Reel outperform my account average, and how do I build a Part 2 sequel?',
-                      'Build a 7-day US Audience posting schedule (EST & PST) from my live Reel stats',
+                      {
+                        short: 'Compare top 3 posts & write 3 scripts',
+                        full: 'Compare my top 3 live Reels by Views & Engagement Rate and write 3 new Reel scripts',
+                      },
+                      {
+                        short: 'Why #1 post won + Part 2 sequel',
+                        full: 'Why did my #1 live Reel outperform my account average, and how do I build a Part 2 sequel?',
+                      },
+                      {
+                        short: '7-day US posting schedule (EST/PST)',
+                        full: 'Build a 7-day US Audience posting schedule (EST & PST) from my live Reel stats',
+                      },
                     ].map((preset) => (
                       <button
-                        key={preset}
+                        key={preset.short}
                         type="button"
-                        onClick={() => handleRunOpenClaw(preset)}
+                        onClick={() => handleRunOpenClaw(preset.full)}
                         className="px-3 py-1 rounded-xl bg-[#F5EEFF] hover:bg-[#FF7EB6] border border-[#19154E] text-[11px] font-bold text-[#19154E] transition-colors duration-150"
                       >
-                        ✨ {preset}
+                        ✨ {preset.short}
                       </button>
                     ))}
                   </div>
@@ -3867,7 +3960,7 @@ export default function App() {
                       value={openclawPrompt}
                       onChange={(e) => setOpenclawPrompt(e.target.value)}
                       className="flex-1 px-4 py-2.5 rounded-xl bg-[#FFF8FC] border-2 border-[#19154E] text-xs sm:text-sm font-semibold text-[#19154E]"
-                      placeholder="Ask your OpenClaw Agent anything about your video text summaries or US audience..."
+                      placeholder="Ask OpenClaw anything about your post metrics or US audience..."
                     />
                     <button
                       type="button"
@@ -3877,9 +3970,7 @@ export default function App() {
                     >
                       <Sparkles className="w-4 h-4" />
                       <span>
-                        {openclawStatus === 'running'
-                          ? 'Analyzing Summaries...'
-                          : '🦞 Run OpenClaw Agent'}
+                        {openclawStatus === 'running' ? 'Analyzing...' : 'Run Analysis'}
                       </span>
                     </button>
                   </div>
@@ -3889,40 +3980,84 @@ export default function App() {
                 <div className="p-5 rounded-2xl bg-[#FFFDF9] border-2 border-[#19154E] shadow-[4px_4px_0px_#19154E] space-y-3">
                   <div className="flex items-center justify-between border-b-2 border-dashed border-neutral-200 pb-2.5">
                     <span className="text-xs font-extrabold uppercase tracking-wider text-[#6D28D9]">
-                      🦞 OpenClaw Agent Response (Based on Your Top Video Summaries &amp; US Audience)
+                      🦞 Analysis Output
                     </span>
                     <button
                       type="button"
                       onClick={() => copyToClipboard(openclawOutput, 'openclaw-output')}
                       className="px-2.5 py-1 rounded-lg bg-white border border-[#19154E] text-[11px] font-bold text-[#19154E]"
                     >
-                      {copiedField === 'openclaw-output' ? 'Copied Analysis!' : 'Copy Analysis'}
+                      {copiedField === 'openclaw-output' ? 'Copied!' : 'Copy'}
                     </button>
                   </div>
                   <div className="text-xs sm:text-sm text-[#19154E] whitespace-pre-wrap leading-relaxed font-medium">
                     {openclawOutput}
                   </div>
                 </div>
+
+                {/* Progressive Disclosure for Developer Gateway / Feed URLs */}
+                <details className="pt-1 text-xs">
+                  <summary className="cursor-pointer select-none font-bold text-neutral-500 hover:text-[#19154E]">
+                    ⚙️ Custom OpenClaw Gateway &amp; Telemetry Feed URL (Optional)
+                  </summary>
+                  <div className="mt-3 grid grid-cols-1 lg:grid-cols-12 gap-3 p-4 rounded-2xl bg-[#FFF8FC] border-2 border-[#19154E]">
+                    <div className="lg:col-span-6">
+                      <label className="block text-[11px] font-extrabold uppercase text-[#19154E] mb-1">
+                        OpenClaw Gateway Endpoint URL
+                      </label>
+                      <input
+                        type="text"
+                        value={openclawGatewayUrl}
+                        onChange={(e) => setOpenclawGatewayUrl(e.target.value)}
+                        placeholder="http://localhost:18789/v1/chat/completions"
+                        className="w-full px-3 py-2 rounded-xl bg-white border-2 border-[#19154E] text-xs font-mono-code font-bold text-[#6D28D9]"
+                      />
+                    </div>
+                    <div className="lg:col-span-6">
+                      <label className="block text-[11px] font-extrabold uppercase text-[#19154E] mb-1">
+                        Live Telemetry Feed URL
+                      </label>
+                      <div className="flex gap-2">
+                        <input
+                          type="text"
+                          readOnly
+                          value={`${typeof window !== 'undefined' ? window.location.origin : 'https://www.techfairylab.com'}/api/analytics`}
+                          className="flex-1 px-3 py-2 rounded-xl bg-white border-2 border-[#19154E] text-xs font-mono-code font-bold text-[#19154E]"
+                        />
+                        <button
+                          type="button"
+                          onClick={() =>
+                            copyToClipboard(
+                              `${typeof window !== 'undefined' ? window.location.origin : 'https://www.techfairylab.com'}/api/analytics`,
+                              'brief-url'
+                            )
+                          }
+                          className="px-3 py-2 rounded-xl bg-[#EDE9FE] border-2 border-[#19154E] text-xs font-bold text-[#19154E]"
+                        >
+                          {copiedField === 'brief-url' ? 'Copied!' : 'Copy'}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </details>
               </div>
             </div>
 
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-              <div>
-                <h3 className="font-display text-2xl sm:text-3xl font-bold text-[#19154E]">
-                  Growth & DM Conversion Playbook for @{profile.username}
-                </h3>
-                <p className="text-xs sm:text-sm text-neutral-600 font-medium">
-                  Click <strong>Build This DM Flow</strong> on any strategy card to turn it into a live automation!
-                </p>
-              </div>
+            <div>
+              <h3 className="font-display text-xl sm:text-2xl font-bold text-[#19154E]">
+                Growth &amp; DM Conversion Playbook {profile.username ? `for @${profile.username}` : ''}
+              </h3>
+              <p className="text-xs text-neutral-600 font-medium">
+                Turn any strategy card directly into an active keyword DM flow.
+              </p>
             </div>
 
             {/* Strategy Cards */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
               {strategies.map((strat, index) => (
                 <div
                   key={strat.id}
-                  className="editorial-card editorial-card-interactive p-6 bg-white flex flex-col justify-between space-y-4"
+                  className="editorial-card editorial-card-interactive p-5 bg-white flex flex-col justify-between space-y-4"
                 >
                   <div className="space-y-3">
                     <div className="flex items-center justify-between gap-2">
@@ -3938,42 +4073,40 @@ export default function App() {
                       </span>
                     </div>
 
-                    <h4 className="font-display text-xl font-bold text-[#19154E]">{strat.title}</h4>
+                    <h4 className="font-display text-lg sm:text-xl font-bold text-[#19154E]">
+                      {strat.title}
+                    </h4>
 
-                    <p className="text-xs text-[#19154E] bg-[#FFF8FC] p-3.5 rounded-2xl border-2 border-[#19154E] font-medium leading-relaxed">
+                    <p className="text-xs text-[#19154E] bg-[#FFF8FC] p-3 rounded-2xl border-2 border-[#19154E] font-medium leading-relaxed">
                       📊 <strong>Why it works:</strong> {strat.finding}
                     </p>
 
-                    <div className="space-y-2 pt-1">
-                      <div className="text-xs font-bold uppercase tracking-wider text-neutral-500">
-                        Action Steps:
-                      </div>
-                      <ul className="space-y-2 text-xs text-neutral-800 font-medium">
-                        {strat.action_items.map((item, idx) => (
-                          <li key={idx} className="flex items-start gap-2">
-                            <CheckCircle2 className="w-4 h-4 text-[#6D28D9] shrink-0 mt-0.5" />
-                            <span>{item}</span>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
+                    <ul className="space-y-1.5 text-xs text-neutral-800 font-medium pt-0.5">
+                      {strat.action_items.map((item, idx) => (
+                        <li key={idx} className="flex items-start gap-2">
+                          <CheckCircle2 className="w-4 h-4 text-[#6D28D9] shrink-0 mt-0.5" />
+                          <span>{item}</span>
+                        </li>
+                      ))}
+                    </ul>
                   </div>
 
-                  <div className="pt-4 border-t-2 border-dashed border-neutral-300 flex items-center justify-between">
+                  <div className="pt-3.5 border-t-2 border-dashed border-neutral-300 flex items-center justify-between gap-2">
                     <span className="text-xs font-bold text-neutral-600">
-                      Trigger Keyword:{' '}
+                      Keyword:{' '}
                       <strong className="font-mono-code px-2 py-0.5 rounded bg-[#EDE9FE] border border-[#19154E] text-[#6D28D9]">
                         &quot;{strat.recommended_keyword}&quot;
                       </strong>
                     </span>
                     <button
+                      type="button"
                       onClick={() =>
                         handleApplyStrategyKeyword(strat.recommended_keyword, strat.title)
                       }
-                      className="editorial-btn px-4 py-2 rounded-xl bg-[#19154E] text-white text-xs font-bold flex items-center gap-1.5"
+                      className="editorial-btn px-3.5 py-2 rounded-xl bg-[#19154E] text-white text-xs font-bold flex items-center gap-1.5"
                     >
                       <Zap className="w-3.5 h-3.5 text-[#C8F904]" />
-                      <span>Build This DM Flow</span>
+                      <span>Build DM Flow</span>
                     </button>
                   </div>
                 </div>
@@ -3981,23 +4114,23 @@ export default function App() {
             </div>
 
             {/* Next 3 High-Converting Reel & Carousel Ideas */}
-            <div className="editorial-card p-6 bg-[#EDE9FE] space-y-4">
+            <div className="editorial-card p-5 sm:p-6 bg-[#EDE9FE] space-y-4">
               <div>
-                <h4 className="font-display text-xl font-bold text-[#19154E]">
-                  Next 3 High-Converting Reel Ideas + Paired ManyChat Keywords
+                <h4 className="font-display text-lg sm:text-xl font-bold text-[#19154E]">
+                  Next 3 Content Hooks + Paired DM Keywords
                 </h4>
                 <p className="text-xs font-medium text-neutral-700">
-                  Tailored for @{profile.username || 'your_account'}&apos;s live audience and content pillars:
+                  Tailored for @{profile.username || 'your_account'}&apos;s audience and content pillars:
                 </p>
               </div>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 {contentIdeas.map((idea, i) => (
                   <div
                     key={i}
-                    className="editorial-card-sm p-5 bg-white flex flex-col justify-between space-y-4"
+                    className="editorial-card-sm p-4 bg-white flex flex-col justify-between space-y-3"
                   >
-                    <div className="space-y-2.5">
-                      <div className="flex items-center justify-between text-xs font-bold">
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between text-xs font-bold tabular-nums">
                         <span className="px-2.5 py-0.5 rounded-lg bg-[#FF7EB6] text-[#19154E] border border-[#19154E]">
                           {idea.format}
                         </span>
@@ -4009,10 +4142,10 @@ export default function App() {
                         {idea.title}
                       </h5>
                       <p className="text-xs text-neutral-700 italic bg-[#FFF8FC] p-2.5 rounded-xl border border-neutral-300">
-                        <strong>Opening Hook:</strong> &quot;{idea.hook}&quot;
+                        <strong>Hook:</strong> &quot;{idea.hook}&quot;
                       </p>
                     </div>
-                    <div className="pt-3 border-t border-neutral-200 flex items-center justify-between">
+                    <div className="pt-2.5 border-t border-neutral-200 flex items-center justify-between">
                       <span className="text-xs font-bold text-neutral-600">
                         Keyword:{' '}
                         <strong className="font-mono-code text-[#6D28D9]">
@@ -4020,8 +4153,9 @@ export default function App() {
                         </strong>
                       </span>
                       <button
+                        type="button"
                         onClick={() => handleApplyStrategyKeyword(idea.cta_keyword, idea.title)}
-                        className="text-xs font-bold text-[#FF7EB6] hover:underline"
+                        className="text-xs font-bold text-[#6D28D9] hover:underline"
                       >
                         + Create Trigger →
                       </button>
@@ -4038,47 +4172,37 @@ export default function App() {
             (Instagram, TikTok, YouTube, Facebook, X, Threads)
         ============================================================ */}
         {activeTab === 'connect' && (
-          <div className="max-w-4xl mx-auto space-y-6 panel-enter">
-            <div className="editorial-card p-6 sm:p-8 bg-white space-y-6">
-              <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-center border-b-2 border-[#19154E] pb-5">
-                <div className="md:col-span-8 space-y-2">
+          <div className="max-w-3xl mx-auto space-y-5 panel-enter">
+            <div className="editorial-card p-5 sm:p-7 bg-white space-y-5">
+              <div className="flex items-center justify-between gap-4 border-b-2 border-[#19154E] pb-4">
+                <div className="space-y-1">
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#C8F904] border-2 border-[#19154E] text-xs font-bold">
-                      <ShieldCheck className="w-4 h-4" />
+                    <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-[#C8F904] border border-[#19154E] text-[11px] font-bold">
+                      <ShieldCheck className="w-3.5 h-3.5" />
                       <span>Isolated Workspace</span>
                     </span>
-                    <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#EDE9FE] border-2 border-[#19154E] text-xs font-bold text-[#6D28D9]">
-                      <span>{connectedPlatformIds.length} of 6 Platforms Connected</span>
+                    <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-[#EDE9FE] border border-[#19154E] text-[11px] font-bold text-[#6D28D9] tabular-nums">
+                      <span>{connectedPlatformIds.length} of 6 Connected</span>
                     </span>
-                    {currentUserEmail && (
-                      <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#F5EEFF] border-2 border-[#19154E] text-xs font-bold">
-                        <span>{currentUserEmail}</span>
-                      </span>
-                    )}
                   </div>
-                  <h3 className="font-display text-2xl sm:text-3xl font-bold text-[#19154E]">
-                    Connect Your Social Accounts
-                  </h3>
-                  <p className="text-xs sm:text-sm text-neutral-700 font-medium">
-                    Choose a platform below — <strong>Instagram</strong>, <strong>TikTok</strong>,{' '}
-                    <strong>YouTube</strong>, <strong>Facebook</strong>, <strong>X</strong>, or{' '}
-                    <strong>Threads</strong> — enter your <strong>@handle</strong> or profile URL,
-                    and click the single button to sign in and pull your live stats.
+                  <h2 className="font-display text-2xl sm:text-3xl font-bold text-[#19154E]">
+                    Connect Social Accounts
+                  </h2>
+                  <p className="text-xs sm:text-sm text-neutral-600 font-medium">
+                    Select a channel, paste your <strong>@handle</strong> or profile link, and click once to pull live stats.
                   </p>
                 </div>
-                <div className="md:col-span-4 flex justify-center">
-                  <div className="w-48 h-32">
-                    <PlugMechanicCharacter connected={connectedPlatformIds.length > 0} />
-                  </div>
+                <div className="hidden sm:flex w-20 h-16 shrink-0 items-center justify-center">
+                  <PlugMechanicCharacter connected={connectedPlatformIds.length > 0} />
                 </div>
               </div>
 
               {/* 6-Platform Selector Grid */}
-              <div className="space-y-2.5">
+              <div className="space-y-2">
                 <div className="text-xs font-extrabold uppercase tracking-wider text-neutral-600">
-                  1. Select Platform to Connect or Manage
+                  1. Choose Platform
                 </div>
-                <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
                   {PLATFORMS.map((plat) => {
                     const conn = connectionsMap[plat.id];
                     const isSelected = connectPlatform === plat.id;
@@ -4088,9 +4212,9 @@ export default function App() {
                         type="button"
                         data-testid={`select-platform-${plat.id}`}
                         onClick={() => handleSelectConnectPlatform(plat.id)}
-                        className={`p-3.5 rounded-2xl border-2 border-[#19154E] text-left transition-all duration-150 flex items-center justify-between gap-2 ${
+                        className={`p-3 rounded-2xl border-2 border-[#19154E] text-left transition-all duration-150 flex items-center justify-between gap-2 ${
                           isSelected
-                            ? 'bg-[#FFFDF9] shadow-[4px_4px_0px_#19154E] -translate-y-0.5 ring-2 ring-[#FF7EB6]'
+                            ? 'bg-[#FFFDF9] shadow-[3px_3px_0px_#19154E] -translate-y-0.5 ring-2 ring-[#FF7EB6]'
                             : conn?.handle
                             ? 'bg-[#F5EEFF]/60 hover:bg-white'
                             : 'bg-white hover:bg-[#FFF8FC]'
@@ -4098,7 +4222,7 @@ export default function App() {
                       >
                         <div className="flex items-center gap-2.5 min-w-0">
                           <span
-                            className="w-9 h-9 rounded-xl border-2 border-[#19154E] flex items-center justify-center shrink-0"
+                            className="w-8 h-8 rounded-xl border-2 border-[#19154E] flex items-center justify-center shrink-0"
                             style={{
                               backgroundColor: plat.badgeBg,
                               color: plat.badgeText,
@@ -4115,15 +4239,16 @@ export default function App() {
                                 conn?.handle ? 'text-emerald-700 font-mono-code' : 'text-neutral-500'
                               }`}
                             >
-                              {conn?.handle ? `● @${conn.handle}` : 'Not connected'}
+                              {conn?.handle
+                                ? conn.has_access_token
+                                  ? `⚡ @${conn.handle}`
+                                  : `● @${conn.handle}`
+                                : oauthProviders[plat.id]
+                                ? '⚡ 1-Click Ready'
+                                : 'Not connected'}
                             </div>
                           </div>
                         </div>
-                        {isSelected && (
-                          <span className="text-[10px] font-extrabold px-2 py-0.5 rounded-md bg-[#C8F904] border border-[#19154E] text-[#19154E] shrink-0">
-                            Selected
-                          </span>
-                        )}
                       </button>
                     );
                   })}
@@ -4132,7 +4257,7 @@ export default function App() {
 
               {connectStatusMsg && (
                 <div
-                  className={`p-4 rounded-2xl text-xs font-bold border-2 border-[#19154E] ${
+                  className={`p-3.5 rounded-2xl text-xs font-bold border-2 border-[#19154E] ${
                     connectStatusMsg.type === 'error'
                       ? 'bg-[#FF7EB6] text-[#19154E]'
                       : 'bg-[#C8F904] text-[#19154E]'
@@ -4173,7 +4298,7 @@ export default function App() {
                   </div>
                 )}
 
-                <div className="p-5 rounded-2xl bg-[#FFF8FC] border-2 border-[#19154E] space-y-3">
+                <div className="p-4 sm:p-5 rounded-2xl bg-[#FFF8FC] border-2 border-[#19154E] space-y-2.5">
                   <div className="flex items-center justify-between gap-2">
                     <label className="text-sm font-display font-bold text-[#19154E] flex items-center gap-2">
                       <span
@@ -4185,17 +4310,22 @@ export default function App() {
                       >
                         <PlatformIcon platform={connectMeta.id} className="w-3.5 h-3.5" />
                       </span>
-                      <span>2. {connectMeta.name} Profile Link or @Handle</span>
+                      <span>
+                        2. {connectMeta.name} Profile Link or @Handle
+                        {oauthProviders[connectMeta.id] ? ' (Optional with 1-Click OAuth)' : ''}
+                      </span>
                     </label>
                     {connectionsMap[connectMeta.id]?.handle && (
                       <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-[#C8F904] border border-[#19154E] text-[#19154E]">
-                        Connected: @{connectionsMap[connectMeta.id].handle}
+                        {connectionsMap[connectMeta.id]?.has_access_token
+                          ? `⚡ Auto-Post: @${connectionsMap[connectMeta.id].handle}`
+                          : `Connected: @${connectionsMap[connectMeta.id].handle}`}
                       </span>
                     )}
                   </div>
                   <input
                     type="text"
-                    required
+                    required={!oauthProviders[connectMeta.id]}
                     data-testid="platform-handle-input"
                     value={handleInput}
                     onChange={(e) => setHandleInput(e.target.value)}
@@ -4220,7 +4350,9 @@ export default function App() {
                       <>
                         Detected {connectMeta.name} account:{' '}
                         <strong className="font-mono-code text-[#6D28D9]">
-                          Enter your {connectMeta.name} @handle above
+                          {oauthProviders[connectMeta.id]
+                            ? `1-Click OAuth ready — click below or enter @handle`
+                            : `Enter your ${connectMeta.name} @handle above`}
                         </strong>
                       </>
                     )}
@@ -4231,7 +4363,7 @@ export default function App() {
                   type="submit"
                   disabled={syncing}
                   data-testid="single-connect-btn"
-                  className="w-full editorial-btn py-4 px-6 rounded-2xl bg-[#C8F904] text-[#19154E] font-display font-bold text-sm sm:text-base flex items-center justify-center gap-2.5"
+                  className="w-full editorial-btn py-3.5 px-6 rounded-2xl bg-[#C8F904] text-[#19154E] font-display font-bold text-sm sm:text-base flex items-center justify-center gap-2.5"
                 >
                   {syncing ? (
                     <>
@@ -4243,7 +4375,11 @@ export default function App() {
                   ) : (
                     <>
                       <PlatformIcon platform={connectMeta.id} className="w-5 h-5" />
-                      <span>Connect to {connectMeta.name} &amp; Pull Stats ↗</span>
+                      <span>
+                        {oauthProviders[connectMeta.id]
+                          ? `Connect & Authorize ${connectMeta.name} (Pull Stats) ↗`
+                          : `Connect to ${connectMeta.name} & Pull Stats ↗`}
+                      </span>
                     </>
                   )}
                 </button>
@@ -4258,7 +4394,7 @@ export default function App() {
                       }}
                       className="text-xs font-bold text-[#6D28D9] hover:underline"
                     >
-                      View @{connectionsMap[connectMeta.id].handle} {connectMeta.name} Stats →
+                      View @{connectionsMap[connectMeta.id].handle} Overview →
                     </button>
                     <button
                       type="button"
@@ -4266,7 +4402,7 @@ export default function App() {
                       onClick={() => handleDisconnectPlatform(connectMeta.id)}
                       className="text-xs font-bold text-neutral-500 hover:text-rose-600 underline"
                     >
-                      Disconnect @{connectionsMap[connectMeta.id].handle} ({connectMeta.name})
+                      Disconnect @{connectionsMap[connectMeta.id].handle}
                     </button>
                   </div>
                 )}
@@ -4275,12 +4411,49 @@ export default function App() {
               {/* Optional Collapsed Advanced Section (Hidden by Default) */}
               <details className="pt-2 border-t border-neutral-200 text-xs">
                 <summary className="cursor-pointer font-bold text-neutral-500 hover:text-[#19154E] select-none py-1">
-                  ⚙️ Advanced {connectMeta.name} API Token Settings (Optional)
+                  ⚙️ App Owner 1-Click OAuth &amp; Advanced Token Setup (Optional)
                 </summary>
                 <form
                   onSubmit={handleConnectSubmit}
                   className="mt-4 space-y-4 p-4 rounded-2xl bg-[#F5EEFF] border-2 border-[#19154E]"
                 >
+                  <div className="p-3 rounded-xl bg-white border border-[#19154E] space-y-1.5">
+                    <div className="font-bold text-[#19154E]">
+                      ⚡ 1-Click OAuth Redirect URI (Add once in Meta / TikTok / Google / X Developer App):
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="text"
+                        readOnly
+                        value={
+                          oauthRedirectUri ||
+                          `${typeof window !== 'undefined' ? window.location.origin : 'https://www.techfairylab.com'}/api/oauth`
+                        }
+                        className="flex-1 px-2.5 py-1.5 rounded-lg bg-[#FFF8FC] border border-[#19154E] font-mono-code text-[11px]"
+                      />
+                      <button
+                        type="button"
+                        onClick={() =>
+                          copyToClipboard(
+                            oauthRedirectUri ||
+                              `${typeof window !== 'undefined' ? window.location.origin : 'https://www.techfairylab.com'}/api/oauth`,
+                            'oauth-redirect-uri'
+                          )
+                        }
+                        className="px-3 py-1.5 rounded-lg bg-[#C8F904] border border-[#19154E] font-bold text-[11px]"
+                      >
+                        {copiedField === 'oauth-redirect-uri' ? 'Copied!' : 'Copy URI'}
+                      </button>
+                    </div>
+                    <p className="text-[11px] text-neutral-600">
+                      Set your platform&apos;s Client ID &amp; Secret once in Vercel Environment Variables (e.g.{' '}
+                      <code className="font-mono-code">INSTAGRAM_APP_ID</code>,{' '}
+                      <code className="font-mono-code">TIKTOK_CLIENT_KEY</code>,{' '}
+                      <code className="font-mono-code">GOOGLE_CLIENT_ID</code>,{' '}
+                      <code className="font-mono-code">FACEBOOK_APP_ID</code>,{' '}
+                      <code className="font-mono-code">X_CLIENT_ID</code>) and every user gets 1-Click OAuth auto-publishing!
+                    </p>
+                  </div>
                   <div>
                     <label className="block text-xs font-bold text-[#19154E] mb-1">
                       {connectMeta.tokenLabel}
@@ -4332,7 +4505,8 @@ export default function App() {
             </div>
           </div>
         )}
-      </main>
+        </main>
+      </div>
     </div>
   );
 }

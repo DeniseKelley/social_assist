@@ -1,6 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
-  Calendar as CalendarIcon,
   Plus,
   Sparkles,
   Upload,
@@ -14,7 +13,6 @@ import {
   Send,
   ChevronLeft,
   ChevronRight,
-  KeyRound,
   ExternalLink,
   X,
   Layers,
@@ -25,29 +23,32 @@ import {
   Database,
 } from 'lucide-react';
 import { supabase } from './supabase';
+import { PlatformIcon } from './platforms';
 
 const TEMP_BUCKET = 'scheduled-media';
 const MAX_TEMP_FILE_BYTES = 50 * 1024 * 1024; // 50 MB Supabase Free Tier cap
 
-export const SUPABASE_SETUP_SQL = `-- SocialAssist: Temporary Media Storage & Multi-Platform Scheduler Setup
+export const SUPABASE_SETUP_SQL = `-- SocialAssist: Private scheduled-media RLS & Multi-Platform Scheduler Setup
 -- Paste into Supabase SQL Editor -> Click "Run"
 
 insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
 values (
   'scheduled-media',
   'scheduled-media',
-  true,
+  false,
   52428800,
   array['video/mp4','video/quicktime','video/webm','image/jpeg','image/png','image/webp','image/gif']
 )
 on conflict (id) do update set
-  public = excluded.public,
+  public = false,
   file_size_limit = excluded.file_size_limit,
   allowed_mime_types = excluded.allowed_mime_types;
 
 drop policy if exists "Public can fetch pending scheduled media" on storage.objects;
-create policy "Public can fetch pending scheduled media"
-  on storage.objects for select using (bucket_id = 'scheduled-media');
+drop policy if exists "Users read own temp scheduled media" on storage.objects;
+create policy "Users read own temp scheduled media"
+  on storage.objects for select to authenticated
+  using (bucket_id = 'scheduled-media' and (storage.foldername(name))[1] = auth.uid()::text);
 
 drop policy if exists "Users upload own temp scheduled media" on storage.objects;
 create policy "Users upload own temp scheduled media"
@@ -122,7 +123,6 @@ export const PLATFORMS = [
     badgeBg: 'bg-[#FF7EB6]',
     badgeText: 'text-[#19154E]',
     composerUrl: 'https://www.instagram.com/',
-    tokenHint: 'Uses your Connect IG Graph API token automatically (or override here).',
     needsAccountId: false,
   },
   {
@@ -131,10 +131,9 @@ export const PLATFORMS = [
     short: 'TT',
     sub: '9:16 Video • Photo Mode',
     maxChars: 2200,
-    badgeBg: 'bg-[#19154E]',
-    badgeText: 'text-[#C8F904]',
+    badgeBg: 'bg-[#C8F904]',
+    badgeText: 'text-[#19154E]',
     composerUrl: 'https://www.tiktok.com/tiktokstudio/upload',
-    tokenHint: 'TikTok Content Posting API v2 OAuth Bearer token.',
     needsAccountId: false,
   },
   {
@@ -143,10 +142,31 @@ export const PLATFORMS = [
     short: 'YT',
     sub: 'Shorts • Long Video',
     maxChars: 100,
-    badgeBg: 'bg-[#FF5A5F]',
-    badgeText: 'text-white',
+    badgeBg: 'bg-[#FF6B6B]',
+    badgeText: 'text-[#19154E]',
     composerUrl: 'https://studio.youtube.com/',
-    tokenHint: 'YouTube Data API v3 OAuth 2.0 Bearer token.',
+    needsAccountId: false,
+  },
+  {
+    id: 'facebook',
+    name: 'Facebook',
+    short: 'FB',
+    sub: 'Reels • Page Feed',
+    maxChars: 5000,
+    badgeBg: 'bg-[#7CC4FA]',
+    badgeText: 'text-[#19154E]',
+    composerUrl: 'https://business.facebook.com/latest/composer',
+    needsAccountId: false,
+  },
+  {
+    id: 'x',
+    name: 'X',
+    short: 'X',
+    sub: 'Post • Video • Images',
+    maxChars: 280,
+    badgeBg: 'bg-[#19154E]',
+    badgeText: 'text-[#FFF8FC]',
+    composerUrl: 'https://x.com/compose/post',
     needsAccountId: false,
   },
   {
@@ -155,49 +175,10 @@ export const PLATFORMS = [
     short: 'TH',
     sub: 'Threads • Media Post',
     maxChars: 500,
-    badgeBg: 'bg-[#E2D4FF]',
+    badgeBg: 'bg-[#B799E8]',
     badgeText: 'text-[#19154E]',
-    composerUrl: 'https://www.threads.net/',
-    tokenHint: 'Meta Threads Graph API (graph.threads.net) user token.',
+    composerUrl: 'https://www.threads.com/',
     needsAccountId: false,
-  },
-  {
-    id: 'x',
-    name: 'X / Twitter',
-    short: 'X',
-    sub: 'Post • Video • Images',
-    maxChars: 280,
-    badgeBg: 'bg-[#C8F904]',
-    badgeText: 'text-[#19154E]',
-    composerUrl: 'https://x.com/compose/post',
-    tokenHint: 'X API v2 OAuth 2.0 User Access Token (tweet.write).',
-    needsAccountId: false,
-  },
-  {
-    id: 'linkedin',
-    name: 'LinkedIn',
-    short: 'IN',
-    sub: 'Creator Post • Video',
-    maxChars: 3000,
-    badgeBg: 'bg-[#93C5FD]',
-    badgeText: 'text-[#19154E]',
-    composerUrl: 'https://www.linkedin.com/feed/',
-    tokenHint: 'LinkedIn OAuth 2.0 token + Person/Org URN ID.',
-    needsAccountId: true,
-    accountIdLabel: 'Person or Org URN (e.g. urn:li:person:AbCdEf)',
-  },
-  {
-    id: 'facebook',
-    name: 'Facebook Page',
-    short: 'FB',
-    sub: 'Reels • Page Feed',
-    maxChars: 5000,
-    badgeBg: 'bg-[#BAE6FD]',
-    badgeText: 'text-[#19154E]',
-    composerUrl: 'https://business.facebook.com/latest/composer',
-    tokenHint: 'Facebook Page Access Token + Page ID.',
-    needsAccountId: true,
-    accountIdLabel: 'Facebook Page ID',
   },
 ];
 
@@ -325,7 +306,12 @@ export default function PlannerCalendar({
   igHandle,
   igAccessToken,
   igAccountId,
+  activeChannel = 'all',
+  connectionsMap = {},
   sharedTokensMap = {},
+  oauthProviders = {},
+  onOneClickConnect,
+  onNavigateConnect,
   onCreateAutoDmFlow,
   showToast,
   triggerFairyWand,
@@ -337,15 +323,17 @@ export default function PlannerCalendar({
   const [cursorDate, setCursorDate] = useState(
     () => new Date(today.getFullYear(), today.getMonth(), 1)
   );
-  const [platformFilter, setPlatformFilter] = useState('all');
+  const platformFilter = activeChannel || 'all';
   const [posts, setPosts] = useState([]);
   const [platformTokens, setPlatformTokens] = useState({});
-  const [showTokensModal, setShowTokensModal] = useState(false);
+
+  const connectedPlatformIds = PLATFORMS.map((p) => p.id).filter((id) =>
+    Boolean(connectionsMap?.[id]?.handle)
+  );
 
   // Supabase Temporary Cloud Storage & Queue state
   const [supabaseUser, setSupabaseUser] = useState(null);
   const [supabaseStatus, setSupabaseStatus] = useState('checking'); // 'checking' | 'connected' | 'needs_setup'
-  const [showSetupSqlModal, setShowSetupSqlModal] = useState(false);
   const [uploadingCount, setUploadingCount] = useState(0);
 
   // Composer Modal State
@@ -403,10 +391,26 @@ export default function PlannerCalendar({
 
       setSupabaseStatus('connected');
       if (Array.isArray(rows) && rows.length > 0) {
-        const hydrated = rows.map((r) => ({
-          ...r,
-          media_items: hydrateMediaItemsFromRow(r),
-        }));
+        const hydrated = await Promise.all(
+          rows.map(async (r) => {
+            let refreshedUrls = Array.isArray(r.media_urls) ? r.media_urls : [];
+            if (Array.isArray(r.storage_paths) && r.storage_paths.length > 0) {
+              const { data: signedBatch } = await supabase.storage
+                .from(TEMP_BUCKET)
+                .createSignedUrls(r.storage_paths, 86400);
+              if (Array.isArray(signedBatch) && signedBatch.some((s) => s?.signedUrl)) {
+                refreshedUrls = signedBatch.map(
+                  (s, idx) => s?.signedUrl || refreshedUrls[idx] || ''
+                );
+              }
+            }
+            const nextRow = { ...r, media_urls: refreshedUrls };
+            return {
+              ...nextRow,
+              media_items: hydrateMediaItemsFromRow(nextRow),
+            };
+          })
+        );
         setPosts(hydrated);
         localStorage.setItem(scopedKey('sa_scheduled_posts'), JSON.stringify(hydrated));
       }
@@ -450,7 +454,7 @@ export default function PlannerCalendar({
     }
 
     checkAndLoadSupabase();
-  }, [scopedKey]);
+  }, [scopedKey, connectionsMap]);
 
   // Live Browser Auto-Scheduler: checks every 25s for due `scheduled` posts & fires them automatically!
   useEffect(() => {
@@ -544,22 +548,24 @@ export default function PlannerCalendar({
       return Boolean(
         platformTokens?.instagram?.access_token?.trim() ||
           sharedTok ||
-          (igAccessToken && igAccessToken.trim())
+          (igAccessToken && igAccessToken.trim()) ||
+          connectionsMap?.instagram?.has_access_token
       );
     }
     const cfg = platformTokens?.[platformId];
-    if (!cfg?.access_token?.trim() && !sharedTok) return false;
-    const meta = PLATFORMS.find((p) => p.id === platformId);
-    if (meta?.needsAccountId && !cfg?.account_id?.trim()) return false;
-    return true;
+    return Boolean(
+      cfg?.access_token?.trim() || sharedTok || connectionsMap?.[platformId]?.has_access_token
+    );
   };
 
   const openComposerForSlot = (dateKey, defaultTime) => {
     const dt = new Date(`${dateKey}T12:00:00`);
     const peak = PEAK_WINDOWS_BY_DOW[dt.getDay()]?.time || '18:00';
+    const defaultPlats =
+      connectedPlatformIds.length > 0 ? connectedPlatformIds : ['instagram', 'tiktok', 'youtube'];
     setEditingId(null);
     setFormat('video');
-    setSelectedPlatforms(['instagram', 'tiktok', 'youtube']);
+    setSelectedPlatforms(defaultPlats);
     setTitle('');
     setMasterCaption('');
     setCaptionOverrides({});
@@ -570,7 +576,7 @@ export default function PlannerCalendar({
     setAutoCleanup(true);
     setMediaItems([]);
     setRemoteUrlInput('');
-    setPreviewPlatform('instagram');
+    setPreviewPlatform(defaultPlats[0] || 'instagram');
     setPreviewSlideIdx(0);
     setAttachDmTrigger(false);
     setDmKeyword('LINK');
@@ -681,17 +687,21 @@ export default function PlannerCalendar({
             'error'
           );
         } else {
+          // Mint a 48h Signed URL from the private `scheduled-media` bucket!
+          const { data: signedData } = await supabase.storage
+            .from(TEMP_BUCKET)
+            .createSignedUrl(storagePath, 172800);
           const { data: pubUrlData } = supabase.storage
             .from(TEMP_BUCKET)
             .getPublicUrl(storagePath);
-          const publicUrl = pubUrlData?.publicUrl || slide.url;
+          const resolvedUrl = signedData?.signedUrl || pubUrlData?.publicUrl || slide.url;
           setSupabaseStatus('connected');
           setMediaItems((prev) =>
             prev.map((m) =>
               m.id === slide.id
                 ? {
                     ...m,
-                    url: publicUrl,
+                    url: resolvedUrl,
                     isRemote: true,
                     storagePath,
                     uploading: false,
@@ -891,6 +901,7 @@ export default function PlannerCalendar({
       PLATFORMS.forEach((pl) => {
         const localCfg = platformTokens?.[pl.id] || {};
         const sharedTok = (sharedTokensMap?.[pl.id] || '').trim();
+        const connEntry = connectionsMap?.[pl.id] || {};
         mergedTokens[pl.id] = {
           access_token:
             (localCfg.access_token || '').trim() ||
@@ -898,9 +909,27 @@ export default function PlannerCalendar({
             (pl.id === 'instagram' ? (igAccessToken || '').trim() : ''),
           account_id:
             (localCfg.account_id || '').trim() ||
+            (connEntry.account_id || '').trim() ||
             (pl.id === 'instagram' ? (igAccountId || '').trim() : ''),
         };
       });
+
+      // Mint fresh 1-hour Signed URLs from private `scheduled-media` bucket right before dispatch!
+      let dispatchMediaUrls = Array.isArray(record.media_urls) ? [...record.media_urls] : [];
+      if (supabaseUser && Array.isArray(record.storage_paths) && record.storage_paths.length > 0) {
+        try {
+          const { data: signedBatch } = await supabase.storage
+            .from(TEMP_BUCKET)
+            .createSignedUrls(record.storage_paths, 3600);
+          if (Array.isArray(signedBatch) && signedBatch.some((s) => s?.signedUrl)) {
+            dispatchMediaUrls = signedBatch
+              .map((s, idx) => s?.signedUrl || dispatchMediaUrls[idx] || '')
+              .filter(Boolean);
+          }
+        } catch {
+          // keep existing media_urls fallback
+        }
+      }
 
       let dispatchData = null;
       try {
@@ -915,7 +944,7 @@ export default function PlannerCalendar({
               captions: record.captions,
               format: record.format,
               platforms: record.platforms,
-              media_urls: record.media_urls,
+              media_urls: dispatchMediaUrls,
               first_comment: record.first_comment,
             },
             platform_tokens: mergedTokens,
@@ -984,7 +1013,7 @@ export default function PlannerCalendar({
         );
       } else {
         showToast(
-          `${prefix}Queued across ${results.length} platform(s)! Connect API keys anytime for live auto-post.`
+          `${prefix}Queued across ${results.length} connected platform(s)! Authorize 1-Click Auto-Post in Connect anytime.`
         );
       }
     } finally {
@@ -1044,26 +1073,6 @@ export default function PlannerCalendar({
       showToast(`Rescheduled "${moved.title.slice(0, 28)}" to ${targetDateKey}!`);
     }
     setDraggedPostId(null);
-  };
-
-  const handleSaveTokens = async (e) => {
-    e.preventDefault();
-    localStorage.setItem(scopedKey('sa_platform_tokens'), JSON.stringify(platformTokens));
-    if (supabaseUser) {
-      await supabase
-        .from('user_platform_tokens')
-        .upsert(
-          {
-            user_id: supabaseUser.id,
-            tokens: platformTokens,
-            updated_at: new Date().toISOString(),
-          },
-          { onConflict: 'user_id' }
-        )
-        .catch(() => {});
-    }
-    setShowTokensModal(false);
-    showToast('Saved multi-platform API settings to your workspace!');
   };
 
   const copyText = (text, key, msg = 'Copied to clipboard!') => {
@@ -1141,23 +1150,23 @@ export default function PlannerCalendar({
   const currentSlide = mediaItems[previewSlideIdx] || mediaItems[0] || null;
 
   return (
-    <div className="space-y-6 panel-enter">
+    <div className="space-y-5 panel-enter">
       {/* ============================================================
-          SUPABASE TEMP CLOUD STORAGE STATUS / 1-CLICK SQL SETUP BAR
+          1-TIME SUPABASE TEMP CLOUD STORAGE SETUP (SHOWN ONLY IF NEEDED)
       ============================================================ */}
-      {supabaseStatus === 'needs_setup' ? (
-        <div className="editorial-card p-4 sm:p-5 bg-[#FFF0F7] flex flex-col md:flex-row md:items-center justify-between gap-4">
+      {supabaseStatus === 'needs_setup' && (
+        <div className="editorial-card-sm p-4 bg-[#FFF0F7] flex flex-col md:flex-row md:items-center justify-between gap-3">
           <div className="flex items-start gap-3">
-            <div className="w-10 h-10 rounded-2xl bg-[#C8F904] border-2 border-[#19154E] flex items-center justify-center shrink-0">
-              <Database className="w-5 h-5 text-[#19154E]" />
+            <div className="w-9 h-9 rounded-xl bg-[#C8F904] border-2 border-[#19154E] flex items-center justify-center shrink-0">
+              <Database className="w-4 h-4 text-[#19154E]" />
             </div>
             <div>
-              <h4 className="font-display font-bold text-sm sm:text-base text-[#19154E]">
-                ⚡ Enable Supabase Temporary Video Storage &amp; Cloud Scheduler (1-Time SQL)
+              <h4 className="font-display font-bold text-sm text-[#19154E]">
+                Finish Linking Private <code className="font-mono-code">scheduled-media</code> Bucket (1-Time SQL)
               </h4>
               <p className="text-xs text-neutral-700 mt-0.5">
-                Creates your private <code className="font-mono-code font-bold">scheduled-media</code> bucket &amp;{' '}
-                <code className="font-mono-code font-bold">scheduled_posts</code> queue. Videos upload temporarily so Instagram/TikTok can pull them, then <strong>auto-delete right after publishing</strong>!
+                Adds private owner-only RLS policies to your <code className="font-mono-code font-bold">scheduled-media</code> bucket &amp; creates the{' '}
+                <code className="font-mono-code font-bold">scheduled_posts</code> queue (mints short-lived Signed URLs when posting, then auto-deletes files).
               </p>
             </div>
           </div>
@@ -1172,192 +1181,60 @@ export default function PlannerCalendar({
                   'Copied Supabase Setup SQL! Paste it into Supabase SQL Editor & click Run.'
                 )
               }
-              className="editorial-btn px-3.5 py-2 rounded-xl bg-[#C8F904] text-[#19154E] text-xs font-bold flex items-center gap-1.5"
+              className="editorial-btn px-3 py-1.5 rounded-xl bg-[#C8F904] text-[#19154E] text-xs font-bold flex items-center gap-1.5"
             >
               {copiedId === 'setup-sql' ? (
                 <Check className="w-3.5 h-3.5" />
               ) : (
                 <Copy className="w-3.5 h-3.5" />
               )}
-              <span>{copiedId === 'setup-sql' ? 'Copied SQL!' : '1. Copy Setup SQL'}</span>
+              <span>{copiedId === 'setup-sql' ? 'Copied SQL!' : '1. Copy SQL'}</span>
             </button>
 
             <a
               href="https://supabase.com/dashboard/project/ttmtmsafqmfjdkbtjglv/sql/new"
               target="_blank"
               rel="noreferrer"
-              className="editorial-btn px-3.5 py-2 rounded-xl bg-white text-[#19154E] text-xs font-bold flex items-center gap-1.5"
+              className="editorial-btn px-3 py-1.5 rounded-xl bg-white text-[#19154E] text-xs font-bold flex items-center gap-1.5"
             >
-              <span>2. Open SQL Editor</span>
+              <span>2. SQL Editor</span>
               <ExternalLink className="w-3.5 h-3.5" />
             </a>
 
             <button
               type="button"
               onClick={checkAndLoadSupabase}
-              className="editorial-btn px-3 py-2 rounded-xl bg-[#19154E] text-white text-xs font-bold flex items-center gap-1.5"
+              className="editorial-btn px-3 py-1.5 rounded-xl bg-[#19154E] text-white text-xs font-bold flex items-center gap-1.5"
             >
               <RefreshCw className="w-3.5 h-3.5" />
               <span>Verify</span>
             </button>
-
-            <button
-              type="button"
-              onClick={() => setShowSetupSqlModal(true)}
-              className="text-xs font-bold underline text-[#19154E] px-1"
-            >
-              View SQL
-            </button>
           </div>
         </div>
-      ) : supabaseStatus === 'connected' ? (
-        <div className="editorial-card-sm px-4 py-2.5 bg-[#F5EEFF] flex flex-wrap items-center justify-between gap-2 text-xs">
-          <div className="flex items-center gap-2 font-bold text-[#19154E]">
-            <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 border border-[#19154E]" />
-            <Cloud className="w-4 h-4 text-[#19154E]" />
-            <span>Supabase Temp Storage &amp; Auto-Scheduler Connected</span>
-            <span className="text-neutral-600 font-medium">
-              • {activeTempFilesCount} temp file(s) currently staged (auto-purged after live publish)
-            </span>
-          </div>
-          <button
-            type="button"
-            onClick={checkAndLoadSupabase}
-            className="px-2.5 py-1 rounded-lg bg-white border border-[#19154E] font-bold hover:bg-[#C8F904] flex items-center gap-1"
-          >
-            <RefreshCw className="w-3 h-3" />
-            <span>Sync Queue</span>
-          </button>
-        </div>
-      ) : null}
+      )}
 
       {/* ============================================================
-          TOP PLANNER COMMAND BAR
-      ============================================================ */}
-      <div className="editorial-card p-5 sm:p-6 bg-white">
-        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-          <div>
-            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-[#C8F904] border-2 border-[#19154E] text-xs font-bold mb-2">
-              <CalendarIcon className="w-3.5 h-3.5" />
-              <span>Multi-Platform Content Calendar &amp; Temp Cloud Auto-Poster</span>
-            </div>
-            <h3 className="font-display text-2xl sm:text-3xl font-bold text-[#19154E]">
-              Upload once. Schedule &amp; auto-post everywhere.
-            </h3>
-            <p className="text-xs sm:text-sm text-neutral-600 mt-0.5">
-              Drop a <strong>Video/Reel</strong>, <strong>Carousel</strong>, or <strong>Post</strong> — files stage temporarily in Supabase so platforms can ingest them at your scheduled time, then auto-delete to save storage.
-            </p>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2.5">
-            <button
-              type="button"
-              onClick={() => setShowTokensModal(true)}
-              className="editorial-btn px-3.5 py-2.5 rounded-2xl bg-[#F5EEFF] text-[#19154E] text-xs font-bold flex items-center gap-2"
-            >
-              <KeyRound className="w-4 h-4 text-[#19154E]" />
-              <span>Platform APIs</span>
-              <span className="px-2 py-0.5 rounded-full bg-white border border-[#19154E] text-[11px]">
-                {PLATFORMS.filter((p) => isPlatformLiveReady(p.id)).length}/{PLATFORMS.length} Live
-              </span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => openComposerForSlot(todayKey, '18:00')}
-              className="editorial-btn px-5 py-2.5 rounded-2xl bg-[#FF7EB6] text-[#19154E] text-xs sm:text-sm font-bold flex items-center gap-2"
-            >
-              <Plus className="w-4 h-4 stroke-[2.5]" />
-              <span>New Cross-Platform Post</span>
-            </button>
-          </div>
-        </div>
-
-        {/* Platform Filter Pills + View Switcher */}
-        <div className="mt-5 pt-4 border-t-2 border-neutral-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div className="flex flex-wrap items-center gap-1.5">
-            <button
-              type="button"
-              onClick={() => setPlatformFilter('all')}
-              className={`px-3 py-1.5 rounded-xl text-xs font-bold border-2 border-[#19154E] transition-colors ${
-                platformFilter === 'all'
-                  ? 'bg-[#19154E] text-white'
-                  : 'bg-white text-[#19154E] hover:bg-[#F5EEFF]'
-              }`}
-            >
-              All ({posts.length})
-            </button>
-            {PLATFORMS.map((p) => {
-              const count = posts.filter((item) => (item.platforms || []).includes(p.id)).length;
-              return (
-                <button
-                  key={p.id}
-                  type="button"
-                  onClick={() => setPlatformFilter(p.id)}
-                  className={`px-2.5 py-1.5 rounded-xl text-xs font-bold border-2 border-[#19154E] flex items-center gap-1.5 transition-colors ${
-                    platformFilter === p.id
-                      ? 'bg-[#19154E] text-white'
-                      : 'bg-white text-[#19154E] hover:bg-[#F5EEFF]'
-                  }`}
-                >
-                  <span
-                    className={`w-2 h-2 rounded-full ${
-                      isPlatformLiveReady(p.id) ? 'bg-[#C8F904]' : 'bg-[#B799E8]'
-                    }`}
-                  />
-                  <span>{p.short}</span>
-                  <span className="opacity-70">{count}</span>
-                </button>
-              );
-            })}
-          </div>
-
-          <div className="flex items-center gap-2 self-start sm:self-auto">
-            <div className="inline-flex bg-[#F5EEFF] p-1 rounded-xl border-2 border-[#19154E]">
-              <button
-                type="button"
-                onClick={() => setViewMode('month')}
-                className={`px-3 py-1 rounded-lg text-xs font-bold ${
-                  viewMode === 'month' ? 'bg-[#19154E] text-white' : 'text-[#19154E]'
-                }`}
-              >
-                Month Grid
-              </button>
-              <button
-                type="button"
-                onClick={() => setViewMode('week')}
-                className={`px-3 py-1 rounded-lg text-xs font-bold flex items-center gap-1 ${
-                  viewMode === 'week' ? 'bg-[#19154E] text-white' : 'text-[#19154E]'
-                }`}
-              >
-                <Flame className="w-3.5 h-3.5 text-[#FF7EB6]" />
-                <span>Best-Time Heatmap</span>
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* ============================================================
-          CALENDAR BODY (MONTH GRID OR 7-DAY BEST-TIME HEATMAP)
+          UNIFIED PLANNER TOOLBAR + CALENDAR BODY
       ============================================================ */}
       <div className="editorial-card p-4 sm:p-6 bg-white">
-        <div className="flex items-center justify-between mb-4">
-          <div className="flex items-center gap-2">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 pb-4 mb-4 border-b-2 border-neutral-100">
+          <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
               onClick={() => setCursorDate(new Date(year, month - 1, 1))}
+              aria-label="Previous Month"
               className="editorial-btn p-2 rounded-xl bg-white hover:bg-[#F5EEFF]"
               title="Previous Month"
             >
               <ChevronLeft className="w-4 h-4" />
             </button>
-            <h4 className="font-display text-xl sm:text-2xl font-bold text-[#19154E] px-2">
+            <h3 className="font-display text-xl sm:text-2xl font-bold text-[#19154E] px-1">
               {monthLabel}
-            </h4>
+            </h3>
             <button
               type="button"
               onClick={() => setCursorDate(new Date(year, month + 1, 1))}
+              aria-label="Next Month"
               className="editorial-btn p-2 rounded-xl bg-white hover:bg-[#F5EEFF]"
               title="Next Month"
             >
@@ -1370,21 +1247,54 @@ export default function PlannerCalendar({
             >
               Today
             </button>
+
+            <div className="hidden xl:flex items-center gap-2.5 ml-3 pl-3 border-l border-neutral-200 text-[11px] font-semibold text-neutral-600">
+              <span className="inline-flex items-center gap-1">
+                <span className="w-2 h-2 rounded-full bg-[#C8F904] border border-[#19154E]" />
+                Published
+              </span>
+              <span className="inline-flex items-center gap-1">
+                <span className="w-2 h-2 rounded-full bg-[#FF7EB6] border border-[#19154E]" />
+                Scheduled
+              </span>
+              <span className="inline-flex items-center gap-1">
+                <span className="w-2 h-2 rounded-full bg-[#B799E8] border border-[#19154E]" />
+                Queued
+              </span>
+            </div>
           </div>
 
-          <div className="hidden md:flex items-center gap-3 text-xs font-semibold text-neutral-600">
-            <span className="inline-flex items-center gap-1.5">
-              <span className="w-2.5 h-2.5 rounded-full bg-[#C8F904] border border-[#19154E]" />
-              Published Live
-            </span>
-            <span className="inline-flex items-center gap-1.5">
-              <span className="w-2.5 h-2.5 rounded-full bg-[#FF7EB6] border border-[#19154E]" />
-              Scheduled
-            </span>
-            <span className="inline-flex items-center gap-1.5">
-              <span className="w-2.5 h-2.5 rounded-full bg-[#B799E8] border border-[#19154E]" />
-              Queued Preview
-            </span>
+          <div className="flex flex-wrap items-center gap-2.5">
+            <div className="inline-flex bg-[#F5EEFF] p-1 rounded-xl border-2 border-[#19154E]">
+              <button
+                type="button"
+                onClick={() => setViewMode('month')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${
+                  viewMode === 'month' ? 'bg-[#19154E] text-white' : 'text-[#19154E]'
+                }`}
+              >
+                Month
+              </button>
+              <button
+                type="button"
+                onClick={() => setViewMode('week')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1 transition-colors ${
+                  viewMode === 'week' ? 'bg-[#19154E] text-white' : 'text-[#19154E]'
+                }`}
+              >
+                <Flame className="w-3.5 h-3.5 text-[#FF7EB6]" />
+                <span>Best-Time Heatmap</span>
+              </button>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => openComposerForSlot(todayKey, '18:00')}
+              className="editorial-btn px-4 py-2 rounded-xl bg-[#FF7EB6] text-[#19154E] text-xs sm:text-sm font-bold flex items-center gap-1.5"
+            >
+              <Plus className="w-4 h-4 stroke-[2.5]" />
+              <span>New Post</span>
+            </button>
           </div>
         </div>
 
@@ -1578,29 +1488,38 @@ export default function PlannerCalendar({
           UPCOMING CROSS-PLATFORM QUEUE & TEMP STORAGE STATUS LIST
       ============================================================ */}
       <div className="editorial-card p-5 sm:p-6 bg-white space-y-4">
-        <div className="flex items-center justify-between">
+        <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <h4 className="font-display text-xl font-bold text-[#19154E]">
-              Scheduled &amp; Cross-Posted Queue ({filteredPosts.length})
+            <h4 className="font-display text-lg sm:text-xl font-bold text-[#19154E] tabular-nums">
+              Scheduled Queue ({filteredPosts.length})
             </h4>
             <p className="text-xs text-neutral-600">
-              Due <code className="font-mono-code font-bold">scheduled</code> posts fire automatically on time and clean up temporary Supabase files after publishing.
+              Due posts dispatch automatically on schedule and clean up temporary cloud files after publishing.
             </p>
           </div>
+          {supabaseStatus === 'connected' && (
+            <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-xl bg-[#F5EEFF] border border-[#19154E] text-xs font-bold text-[#19154E]">
+              <span className="w-2 h-2 rounded-full bg-emerald-500 border border-[#19154E]" />
+              <Cloud className="w-3.5 h-3.5" />
+              <span className="tabular-nums">{activeTempFilesCount} staged</span>
+              <button
+                type="button"
+                onClick={checkAndLoadSupabase}
+                aria-label="Sync queue from cloud"
+                title="Sync queue from cloud"
+                className="ml-1 p-1 rounded-md bg-white border border-[#19154E] hover:bg-[#C8F904] transition-colors"
+              >
+                <RefreshCw className="w-3 h-3" />
+              </button>
+            </div>
+          )}
         </div>
 
         {filteredPosts.length === 0 ? (
-          <div className="p-8 text-center rounded-2xl bg-[#FFF8FC] border-2 border-dashed border-[#19154E]/40">
-            <p className="font-display font-bold text-base text-[#19154E]">
-              No posts scheduled yet — click any day on the calendar to schedule your first Video or Carousel!
+          <div className="p-6 text-center rounded-2xl bg-[#FFF8FC] border-2 border-dashed border-[#19154E]/30">
+            <p className="text-xs sm:text-sm font-semibold text-neutral-600">
+              No posts scheduled yet — click any calendar day above or <strong>New Post</strong> to schedule your first video, carousel, or thread.
             </p>
-            <button
-              type="button"
-              onClick={() => openComposerForSlot(todayKey, '18:00')}
-              className="mt-3 editorial-btn px-4 py-2 rounded-xl bg-[#C8F904] text-xs font-bold"
-            >
-              + Schedule Multi-Platform Post
-            </button>
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -1783,23 +1702,25 @@ export default function PlannerCalendar({
                     <label className="text-xs font-bold uppercase tracking-wider text-neutral-600">
                       2. Post To Platforms ({selectedPlatforms.length} Selected)
                     </label>
-                    <div className="flex items-center gap-1.5">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setSelectedPlatforms(['instagram', 'tiktok', 'youtube']);
-                          setPreviewPlatform('instagram');
-                        }}
-                        className="text-[11px] font-bold px-2.5 py-0.5 rounded-lg bg-white border border-[#19154E] hover:bg-[#C8F904]"
-                      >
-                        🎬 Video Trio (IG+TT+YT)
-                      </button>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {connectedPlatformIds.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSelectedPlatforms(connectedPlatformIds);
+                            setPreviewPlatform(connectedPlatformIds[0]);
+                          }}
+                          className="text-[11px] font-bold px-2.5 py-0.5 rounded-lg bg-[#C8F904] border border-[#19154E] hover:opacity-90"
+                        >
+                          ✓ My Connected ({connectedPlatformIds.length})
+                        </button>
+                      )}
                       <button
                         type="button"
                         onClick={() => setSelectedPlatforms(PLATFORMS.map((p) => p.id))}
                         className="text-[11px] font-bold px-2.5 py-0.5 rounded-lg bg-white border border-[#19154E] hover:bg-[#FF7EB6]"
                       >
-                        Select All 7
+                        Select All ({PLATFORMS.length})
                       </button>
                     </div>
                   </div>
@@ -1808,23 +1729,32 @@ export default function PlannerCalendar({
                     {PLATFORMS.map((plat) => {
                       const isSelected = selectedPlatforms.includes(plat.id);
                       const liveReady = isPlatformLiveReady(plat.id);
+                      const conn = connectionsMap?.[plat.id];
+                      const handle = conn?.handle;
                       return (
-                        <button
+                        <div
                           key={plat.id}
-                          type="button"
                           onClick={() => togglePlatform(plat.id)}
-                          className={`p-2.5 rounded-2xl border-2 border-[#19154E] text-left flex items-center justify-between gap-2 transition-colors ${
+                          role="button"
+                          tabIndex={0}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault();
+                              togglePlatform(plat.id);
+                            }
+                          }}
+                          className={`p-2.5 rounded-2xl border-2 border-[#19154E] text-left flex items-center justify-between gap-2 transition-colors cursor-pointer ${
                             isSelected
                               ? 'bg-[#19154E] text-white shadow-[3px_3px_0px_#FF7EB6]'
                               : 'bg-white text-[#19154E] hover:bg-[#F5EEFF]'
                           }`}
                         >
-                          <div className="min-w-0">
+                          <div className="min-w-0 flex-1">
                             <div className="flex items-center gap-1.5">
                               <span
-                                className={`text-[10px] font-extrabold px-1.5 py-0.2 rounded border border-[#19154E] ${plat.badgeBg} ${plat.badgeText}`}
+                                className={`w-5 h-5 rounded-md border border-[#19154E] inline-flex items-center justify-center shrink-0 ${plat.badgeBg} ${plat.badgeText}`}
                               >
-                                {plat.short}
+                                <PlatformIcon platform={plat.id} className="w-3 h-3" />
                               </span>
                               <span className="text-xs font-bold truncate">{plat.name}</span>
                             </div>
@@ -1833,7 +1763,31 @@ export default function PlannerCalendar({
                                 isSelected ? 'text-neutral-300' : 'text-neutral-500'
                               }`}
                             >
-                              {liveReady ? '🟢 Live API Ready' : '🟣 Queue / Preview'}
+                              {liveReady ? (
+                                <span className={isSelected ? 'text-[#C8F904] font-bold' : 'text-emerald-700 font-bold'}>
+                                  🟢 {handle ? `@${handle}` : 'Auto-Post Ready'}
+                                </span>
+                              ) : handle ? (
+                                <span>✓ @{handle}</span>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setComposerOpen(false);
+                                    if (oauthProviders?.[plat.id] && onOneClickConnect) {
+                                      onOneClickConnect(plat.id);
+                                    } else {
+                                      onNavigateConnect?.(plat.id);
+                                    }
+                                  }}
+                                  className={`underline font-bold ${
+                                    isSelected ? 'text-[#FF7EB6]' : 'text-[#6D28D9]'
+                                  }`}
+                                >
+                                  + 1-Click Connect
+                                </button>
+                              )}
                             </div>
                           </div>
                           <div
@@ -1845,7 +1799,7 @@ export default function PlannerCalendar({
                           >
                             {isSelected && <Check className="w-3.5 h-3.5 stroke-[3]" />}
                           </div>
-                        </button>
+                        </div>
                       );
                     })}
                   </div>
@@ -2185,7 +2139,7 @@ export default function PlannerCalendar({
                           </div>
                           <div>
                             <div className="text-xs font-bold text-[#19154E]">
-                              @{igHandle || 'your_studio'}
+                              @{connectionsMap?.[previewPlatform]?.handle || igHandle || 'your_studio'}
                             </div>
                             <div className="text-[10px] text-neutral-500">
                               {PLATFORMS.find((p) => p.id === previewPlatform)?.name} Preview
@@ -2255,7 +2209,9 @@ export default function PlannerCalendar({
 
                       <div className="p-3.5 bg-white space-y-2">
                         <p className="text-xs text-[#19154E] whitespace-pre-line line-clamp-5 leading-relaxed">
-                          <span className="font-bold mr-1.5">@{igHandle || 'your_studio'}</span>
+                          <span className="font-bold mr-1.5">
+                            @{connectionsMap?.[previewPlatform]?.handle || igHandle || 'your_studio'}
+                          </span>
                           {activePreviewCaption}
                         </p>
                         {firstComment && previewPlatform === 'instagram' && (
@@ -2313,165 +2269,6 @@ export default function PlannerCalendar({
               </div>
             </div>
           </div>
-        </div>
-      )}
-
-      {/* ============================================================
-          VIEW SUPABASE SQL MODAL
-      ============================================================ */}
-      {showSetupSqlModal && (
-        <div className="fixed inset-0 z-50 bg-[#19154E]/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="editorial-card bg-[#FFF8FC] w-full max-w-2xl max-h-[85vh] overflow-y-auto p-6 space-y-4">
-            <div className="flex items-center justify-between pb-3 border-b-2 border-[#19154E]">
-              <h4 className="font-display text-lg font-bold text-[#19154E]">
-                Supabase Temporary Storage &amp; Scheduler SQL
-              </h4>
-              <button
-                type="button"
-                onClick={() => setShowSetupSqlModal(false)}
-                className="p-1.5 rounded-xl bg-white border-2 border-[#19154E]"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            <pre className="p-4 rounded-2xl bg-[#19154E] text-[#FFF8FC] text-[11px] font-mono-code overflow-x-auto max-h-96">
-              {SUPABASE_SETUP_SQL}
-            </pre>
-            <div className="flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={() =>
-                  copyText(
-                    SUPABASE_SETUP_SQL,
-                    'modal-sql',
-                    'Copied SQL! Paste into Supabase SQL Editor & click Run.'
-                  )
-                }
-                className="editorial-btn px-4 py-2 rounded-xl bg-[#C8F904] text-xs font-bold"
-              >
-                {copiedId === 'modal-sql' ? 'Copied!' : 'Copy SQL'}
-              </button>
-              <a
-                href="https://supabase.com/dashboard/project/ttmtmsafqmfjdkbtjglv/sql/new"
-                target="_blank"
-                rel="noreferrer"
-                className="editorial-btn px-4 py-2 rounded-xl bg-[#FF7EB6] text-xs font-bold flex items-center gap-1.5"
-              >
-                <span>Open Supabase SQL Editor</span>
-                <ExternalLink className="w-3.5 h-3.5" />
-              </a>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ============================================================
-          PLATFORM API CREDENTIALS MODAL
-      ============================================================ */}
-      {showTokensModal && (
-        <div className="fixed inset-0 z-50 bg-[#19154E]/60 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto">
-          <form
-            onSubmit={handleSaveTokens}
-            className="editorial-card bg-[#FFF8FC] w-full max-w-2xl max-h-[88vh] overflow-y-auto p-6 space-y-4"
-          >
-            <div className="flex items-center justify-between pb-3 border-b-2 border-[#19154E]">
-              <div>
-                <h4 className="font-display text-xl font-bold text-[#19154E]">
-                  🔑 Multi-Platform Live API Connections
-                </h4>
-                <p className="text-xs text-neutral-600">
-                  Saved encrypted in your RLS-isolated Supabase row so scheduled posts can publish automatically!
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setShowTokensModal(false)}
-                className="p-2 rounded-xl bg-white border-2 border-[#19154E]"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <div className="space-y-3">
-              {PLATFORMS.map((plat) => {
-                const cfg = platformTokens[plat.id] || {};
-                const inheritedIg = plat.id === 'instagram' && Boolean(igAccessToken);
-                return (
-                  <div
-                    key={plat.id}
-                    className="p-3.5 rounded-2xl bg-white border-2 border-[#19154E] space-y-2"
-                  >
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <span
-                          className={`text-xs font-extrabold px-2 py-0.5 rounded-lg border border-[#19154E] ${plat.badgeBg} ${plat.badgeText}`}
-                        >
-                          {plat.short}
-                        </span>
-                        <span className="font-display font-bold text-sm text-[#19154E]">
-                          {plat.name}
-                        </span>
-                      </div>
-                      <span className="text-[11px] font-bold">
-                        {isPlatformLiveReady(plat.id) ? (
-                          <span className="text-emerald-700">🟢 Live Token Ready</span>
-                        ) : (
-                          <span className="text-neutral-500">🟣 Safe Queue Mode</span>
-                        )}
-                      </span>
-                    </div>
-                    <p className="text-[11px] text-neutral-500">{plat.tokenHint}</p>
-                    <input
-                      type="password"
-                      value={cfg.access_token || ''}
-                      onChange={(e) =>
-                        setPlatformTokens((prev) => ({
-                          ...prev,
-                          [plat.id]: { ...(prev[plat.id] || {}), access_token: e.target.value },
-                        }))
-                      }
-                      placeholder={
-                        inheritedIg
-                          ? 'Using connected Instagram Graph token (paste here to override)'
-                          : `Optional ${plat.name} Access Token`
-                      }
-                      className="w-full px-3 py-2 rounded-xl bg-[#FFF8FC] border-2 border-[#19154E] text-xs font-mono-code"
-                    />
-                    {plat.needsAccountId && (
-                      <input
-                        type="text"
-                        value={cfg.account_id || ''}
-                        onChange={(e) =>
-                          setPlatformTokens((prev) => ({
-                            ...prev,
-                            [plat.id]: { ...(prev[plat.id] || {}), account_id: e.target.value },
-                          }))
-                        }
-                        placeholder={plat.accountIdLabel}
-                        className="w-full px-3 py-2 rounded-xl bg-[#FFF8FC] border-2 border-[#19154E] text-xs font-mono-code"
-                      />
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-
-            <div className="pt-3 border-t-2 border-[#19154E] flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setShowTokensModal(false)}
-                className="px-4 py-2 rounded-xl bg-white border-2 border-[#19154E] text-xs font-bold"
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                className="editorial-btn px-5 py-2 rounded-xl bg-[#C8F904] text-[#19154E] text-xs font-bold"
-              >
-                Save Platform Connections
-              </button>
-            </div>
-          </form>
         </div>
       )}
     </div>

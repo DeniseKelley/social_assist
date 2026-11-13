@@ -29,6 +29,10 @@ body {
   font-family: 'JetBrains Mono', monospace;
 }
 
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
 /* Clay.global + Upqode Tactile Editorial Bento Cards in Fae's Palette */
 .editorial-card {
   background: #FFFFFF;

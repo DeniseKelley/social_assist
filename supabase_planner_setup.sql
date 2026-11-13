@@ -1,18 +1,17 @@
 -- ============================================================================
--- SocialAssist: Temporary Media Storage & Multi-Platform Scheduler Setup
+-- SocialAssist: Private `scheduled-media` RLS Policies & Scheduler Tables
 -- Paste into Supabase SQL Editor -> Click "Run"
 -- Project: https://supabase.com/dashboard/project/ttmtmsafqmfjdkbtjglv/sql/new
 -- ============================================================================
 
--- 1. Create Temporary Public Media Bucket (`scheduled-media`)
---    Public read is required ONLY while a post is pending so Instagram Graph API,
---    TikTok PULL_FROM_URL, Threads, and Facebook servers can fetch the video/slides.
---    Files are automatically deleted right after publishing (or after 48h expiry).
+-- 1. Ensure `scheduled-media` stays PRIVATE (`public = false`, STANDARD)
+--    SocialAssist mints short-lived Signed URLs when publishing so your bucket
+--    stays 100% private, then auto-deletes files right after posting!
 insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
 values (
   'scheduled-media',
   'scheduled-media',
-  true,
+  false,
   52428800, -- 50 MB max per file (Supabase Free Tier limit)
   array[
     'video/mp4',
@@ -25,15 +24,20 @@ values (
   ]
 )
 on conflict (id) do update set
-  public = excluded.public,
+  public = false,
   file_size_limit = excluded.file_size_limit,
   allowed_mime_types = excluded.allowed_mime_types;
 
--- Storage RLS Policies (Users can only upload/delete inside their own `<auth.uid()>/` folder)
+-- Storage RLS Policies (Strictly private: users can only read/sign/upload/delete inside `<auth.uid()>/`)
 drop policy if exists "Public can fetch pending scheduled media" on storage.objects;
-create policy "Public can fetch pending scheduled media"
+drop policy if exists "Users read own temp scheduled media" on storage.objects;
+create policy "Users read own temp scheduled media"
   on storage.objects for select
-  using (bucket_id = 'scheduled-media');
+  to authenticated
+  using (
+    bucket_id = 'scheduled-media'
+    and (storage.foldername(name))[1] = auth.uid()::text
+  );
 
 drop policy if exists "Users upload own temp scheduled media" on storage.objects;
 create policy "Users upload own temp scheduled media"
@@ -105,7 +109,7 @@ create policy "Users manage own scheduled posts"
   using (auth.uid() = user_id)
   with check (auth.uid() = user_id);
 
--- 3. Per-User Platform Tokens Table (Used by 24/7 background cron publisher)
+-- 3. Per-User Platform Tokens Table (Used by 1-Click OAuth & 24/7 background publisher)
 create table if not exists public.user_platform_tokens (
   user_id uuid primary key default auth.uid() references auth.users(id) on delete cascade,
   tokens jsonb not null default '{}'::jsonb,
@@ -121,22 +125,3 @@ create policy "Users manage own platform tokens"
   to authenticated
   using (auth.uid() = user_id)
   with check (auth.uid() = user_id);
-
--- ============================================================================
--- OPTIONAL (For 24/7 Laptop-Closed Auto-Posting):
--- Once you add `SUPABASE_SERVICE_ROLE_KEY` in Vercel Environment Variables,
--- uncomment & run the block below to trigger `/api/cron-publish` every 5 mins:
--- ============================================================================
--- create extension if not exists pg_cron;
--- create extension if not exists pg_net;
--- select cron.schedule(
---   'social-assist-publish-every-5m',
---   '*/5 * * * *',
---   $$
---   select net.http_post(
---     url := 'https://techfairylab.com/api/cron-publish',
---     headers := '{"Content-Type": "application/json"}'::jsonb,
---     body := '{}'::jsonb
---   );
---   $$
--- );
