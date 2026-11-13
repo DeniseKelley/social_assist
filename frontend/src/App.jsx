@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Instagram,
   MessageSquare,
@@ -21,6 +21,9 @@ import {
   Bookmark,
   Eye,
   MessageCircle,
+  LogIn,
+  UserPlus,
+  LogOut,
 } from 'lucide-react';
 import {
   TechFairyCharacter,
@@ -35,9 +38,11 @@ import {
 } from './fallbackEngine';
 import {
   supabase,
-  isSuperuserEmail,
   SUPABASE_URL,
   SUPABASE_PUBLISHABLE_KEY,
+  peekOAuthIntent,
+  setOAuthIntent,
+  clearOAuthIntent,
 } from './supabase';
 
 export default function App() {
@@ -51,18 +56,19 @@ export default function App() {
   const [toast, setToast] = useState(null);
   const [isCastingWand, setIsCastingWand] = useState(false);
 
-  // Multi-account Auth & Workspace state (each Google/Supabase account gets its own Instagram workspace)
-  const [isAuthenticated, setIsAuthenticated] = useState(
-    () => sessionStorage.getItem('sa_authenticated') === 'true'
-  );
-  const [currentUserEmail, setCurrentUserEmail] = useState(
-    () => sessionStorage.getItem('sa_user_email') || ''
-  );
+  // Strict Sign-Up-Required Multi-Account Auth State
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [authChecking, setAuthChecking] = useState(true);
+  const [currentUserEmail, setCurrentUserEmail] = useState('');
+  const [authMode, setAuthMode] = useState('signin'); // 'signin' | 'signup'
   const [loginUser, setLoginUser] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [loginError, setLoginError] = useState('');
   const [loginInfo, setLoginInfo] = useState('');
-  const [isSignUpMode, setIsSignUpMode] = useState(false);
+  const [authSubmitting, setAuthSubmitting] = useState(false);
+  const verifiedUserIdsRef = useRef(new Set());
+  const signingOutGuardRef = useRef(false);
 
   // Connect form state
   const [handleInput, setHandleInput] = useState('');
@@ -259,43 +265,166 @@ export default function App() {
     }
   };
 
-  useEffect(() => {
-    const initialEmail = sessionStorage.getItem('sa_user_email') || '';
-    fetchAll(initialEmail);
+  const hasCompletedSignUp = (user) => {
+    if (!user) return false;
+    if (verifiedUserIdsRef.current.has(user.id)) return true;
+    if (user.user_metadata?.sa_registered === true) return true;
+    if (Array.isArray(user.identities) && user.identities.some((id) => id.provider === 'email')) {
+      return true;
+    }
+    return false;
+  };
 
-    // Auto-refresh live Instagram numbers every 90 seconds while the tab is visible
+  const cleanAuthUrlParams = () => {
+    if (typeof window === 'undefined') return;
+    const hasAuthParams =
+      window.location.hash.includes('access_token') ||
+      window.location.hash.includes('error') ||
+      window.location.search.includes('code=') ||
+      window.location.search.includes('error=') ||
+      window.location.search.includes('auth_intent=');
+    if (hasAuthParams) {
+      window.history.replaceState(
+        {},
+        document.title,
+        `${window.location.origin}${window.location.pathname}`
+      );
+    }
+  };
+
+  useEffect(() => {
+    // Check if OAuth returned an explicit error/cancellation in URL
+    try {
+      const searchParams = new URLSearchParams(window.location.search);
+      const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+      const oauthErr =
+        searchParams.get('error_description') ||
+        hashParams.get('error_description') ||
+        searchParams.get('error') ||
+        hashParams.get('error');
+      if (oauthErr) {
+        clearOAuthIntent();
+        cleanAuthUrlParams();
+        setLoginError(
+          oauthErr.includes('access_denied')
+            ? 'Google authentication was cancelled.'
+            : decodeURIComponent(oauthErr.replace(/\+/g, ' '))
+        );
+      }
+    } catch {
+      // ignore URL parse issues
+    }
+
+    const safetyTimer = setTimeout(() => {
+      setAuthChecking(false);
+    }, 4000);
+
+    // Auto-refresh live Instagram numbers every 90 seconds while authenticated & visible
     const livePollTimer = setInterval(() => {
-      if (document.visibilityState === 'visible') {
-        const activeEmail = sessionStorage.getItem('sa_user_email') || '';
-        fetchLiveInstagramAnalytics({ forceRefresh: true, emailOverride: activeEmail }).catch(() => {});
+      const activeEmail = sessionStorage.getItem('sa_user_email') || '';
+      if (document.visibilityState === 'visible' && activeEmail) {
+        fetchLiveInstagramAnalytics({ forceRefresh: true, emailOverride: activeEmail }).catch(
+          () => {}
+        );
       }
     }, 90000);
 
-    // Check active Supabase session (any Google or Supabase user gets their own isolated workspace)
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      const email = session?.user?.email?.toLowerCase();
-      if (email) {
-        sessionStorage.setItem('sa_authenticated', 'true');
-        sessionStorage.setItem('sa_user_email', email);
-        setCurrentUserEmail(email);
-        setIsAuthenticated(true);
-        fetchAll(email);
-      }
-    });
-
-    const { data: authSub } = supabase.auth.onAuthStateChange((_event, session) => {
-      const email = session?.user?.email?.toLowerCase();
-      if (email) {
-        sessionStorage.setItem('sa_authenticated', 'true');
-        sessionStorage.setItem('sa_user_email', email);
-        setCurrentUserEmail(email);
-        setIsAuthenticated(true);
-        setLoginError('');
-        if (window.location.hash.includes('access_token') || window.location.search.includes('code=')) {
-          window.history.replaceState({}, document.title, `${window.location.origin}${window.location.pathname}`);
+    const { data: authSub } = supabase.auth.onAuthStateChange(async (event, session) => {
+      // Ignore re-entrant sign-out events triggered by our own unregistered-user rejection
+      if (signingOutGuardRef.current) {
+        if (!session?.user) {
+          signingOutGuardRef.current = false;
+          setIsAuthenticated(false);
+          setAuthChecking(false);
         }
-        fetchAll(email);
+        return;
       }
+
+      const intent = peekOAuthIntent();
+      cleanAuthUrlParams();
+
+      if (!session?.user) {
+        if (event === 'INITIAL_SESSION' || event === 'SIGNED_OUT') {
+          clearOAuthIntent();
+        }
+        sessionStorage.removeItem('sa_user_email');
+        setCurrentUserEmail('');
+        setIsAuthenticated(false);
+        setAuthChecking(false);
+        return;
+      }
+
+      const user = session.user;
+      const email = (user.email || '').toLowerCase();
+
+      // 1. Explicit Sign-Up flow (Google Sign Up or Email Sign Up confirmation link)
+      if (intent === 'signup') {
+        const alreadyRegistered = user.user_metadata?.sa_registered === true;
+        verifiedUserIdsRef.current.add(user.id);
+        clearOAuthIntent();
+        sessionStorage.setItem('sa_user_email', email);
+        setCurrentUserEmail(email);
+        setLoginError('');
+        setLoginInfo('');
+        setIsAuthenticated(true);
+        setAuthChecking(false);
+        fetchAll(email);
+
+        if (!alreadyRegistered) {
+          supabase.auth
+            .updateUser({
+              data: {
+                sa_registered: true,
+                sa_registered_at: new Date().toISOString(),
+              },
+            })
+            .catch(() => {});
+          showToast(`Account created! Welcome, ${email}`);
+        } else {
+          showToast(`Signed in as ${email}`);
+        }
+        return;
+      }
+
+      // 2. Sign-In or Session Reload — STRICTLY require prior Sign Up!
+      if (!hasCompletedSignUp(user)) {
+        clearOAuthIntent();
+        signingOutGuardRef.current = true;
+        sessionStorage.removeItem('sa_user_email');
+        setCurrentUserEmail('');
+        setIsAuthenticated(false);
+        if (intent === 'signin') {
+          setAuthMode('signup');
+          setLoginInfo('');
+          setLoginError(
+            `No account found for ${email || 'that Google account'}. Only users who have signed up can sign in — please sign up below first!`
+          );
+        }
+        await supabase.auth.signOut().catch(() => {});
+        signingOutGuardRef.current = false;
+        setAuthChecking(false);
+        return;
+      }
+
+      // 3. Verified Registered Account -> Sign in to their isolated workspace
+      verifiedUserIdsRef.current.add(user.id);
+      clearOAuthIntent();
+      if (user.user_metadata?.sa_registered !== true) {
+        supabase.auth
+          .updateUser({
+            data: {
+              sa_registered: true,
+              sa_registered_at: new Date().toISOString(),
+            },
+          })
+          .catch(() => {});
+      }
+      sessionStorage.setItem('sa_user_email', email);
+      setCurrentUserEmail(email);
+      setLoginError('');
+      setIsAuthenticated(true);
+      setAuthChecking(false);
+      fetchAll(email);
     });
 
     const handleOAuthMessage = (event) => {
@@ -306,6 +435,7 @@ export default function App() {
     };
     window.addEventListener('message', handleOAuthMessage);
     return () => {
+      clearTimeout(safetyTimer);
       clearInterval(livePollTimer);
       window.removeEventListener('message', handleOAuthMessage);
       authSub?.subscription?.unsubscribe();
@@ -644,10 +774,23 @@ export default function App() {
     setTimeout(() => setCopiedField(null), 2000);
   };
 
-  const handleGoogleSignIn = async () => {
+  const switchAuthTab = (nextMode) => {
+    setAuthMode(nextMode);
     setLoginError('');
     setLoginInfo('');
-    const redirectUrl = `${window.location.origin}${window.location.pathname}`;
+    setLoginPassword('');
+    setConfirmPassword('');
+  };
+
+  const handleGoogleAuth = async (intent) => {
+    setLoginError('');
+    setLoginInfo('');
+    setAuthSubmitting(true);
+
+    const baseUrl = `${window.location.origin}${window.location.pathname}`;
+    const redirectUrl = `${baseUrl}?auth_intent=${intent}`;
+    setOAuthIntent(intent);
+
     try {
       const settingsResp = await fetch(`${SUPABASE_URL}/auth/v1/settings`, {
         headers: { apikey: SUPABASE_PUBLISHABLE_KEY },
@@ -655,14 +798,16 @@ export default function App() {
       if (settingsResp.ok) {
         const settings = await settingsResp.json();
         if (settings?.external && settings.external.google === false) {
+          clearOAuthIntent();
+          setAuthSubmitting(false);
           setLoginError(
-            'Google provider is not toggled ON yet in your techfairylab Supabase project (Authentication → Sign In / Providers → Google). You can sign in below with Supabase Email or toggle Google ON first.'
+            'Google provider is not enabled yet in your Supabase project (Authentication → Sign In / Providers → Google).'
           );
           return;
         }
       }
     } catch {
-      // Proceed to standard OAuth call if preflight check fails
+      // Proceed to OAuth redirect if preflight settings check cannot reach endpoint
     }
 
     const { error } = await supabase.auth.signInWithOAuth({
@@ -675,127 +820,215 @@ export default function App() {
       },
     });
     if (error) {
+      clearOAuthIntent();
+      setAuthSubmitting(false);
       setLoginError(error.message);
     }
   };
 
-  const handleAdminLogin = async (e) => {
+  const handleEmailAuth = async (e) => {
     e.preventDefault();
     setLoginError('');
     setLoginInfo('');
-    const userOrEmail = loginUser.trim().toLowerCase();
-    const redirectUrl = `${window.location.origin}${window.location.pathname}`;
+    clearOAuthIntent();
 
-    // 0. Email account registration on the dedicated techfairylab Supabase project
-    if (isSignUpMode) {
-      if (!userOrEmail.includes('@')) {
-        setLoginError('Please enter a valid email address to create an account.');
-        return;
-      }
-      const { data, error } = await supabase.auth.signUp({
-        email: userOrEmail,
-        password: loginPassword,
-        options: { emailRedirectTo: redirectUrl },
-      });
-      if (error) {
-        setLoginError(error.message);
-        return;
-      }
-      if (data?.session) {
-        sessionStorage.setItem('sa_authenticated', 'true');
-        sessionStorage.setItem('sa_user_email', userOrEmail);
-        setCurrentUserEmail(userOrEmail);
-        setIsAuthenticated(true);
-        setLoginPassword('');
-        await fetchAll(userOrEmail);
-        triggerFairyWand();
-        return;
-      }
-      setIsSignUpMode(false);
-      setLoginInfo(
-        `Confirmation email sent to ${userOrEmail}! Click the link in your inbox and it will bring you right back to SocialAssist.`
-      );
+    const normalizedEmail = loginUser.trim().toLowerCase();
+    if (!normalizedEmail.includes('@') || !normalizedEmail.includes('.')) {
+      setLoginError('Please enter a valid email address.');
       return;
     }
 
-    // 1. If the user entered an email address, authenticate via Supabase Auth!
-    if (userOrEmail.includes('@')) {
-      const { data, error } = await supabase.auth.signInWithPassword({
-        email: userOrEmail,
-        password: loginPassword,
-      });
-      if (!error && data?.user) {
-        sessionStorage.setItem('sa_authenticated', 'true');
-        sessionStorage.setItem('sa_user_email', userOrEmail);
-        setCurrentUserEmail(userOrEmail);
-        setIsAuthenticated(true);
-        setLoginPassword('');
-        await fetchAll(userOrEmail);
-        triggerFairyWand();
+    const baseUrl = `${window.location.origin}${window.location.pathname}`;
+
+    if (authMode === 'signup') {
+      if (loginPassword.length < 6) {
+        setLoginError('Password must be at least 6 characters long.');
         return;
       }
-      // Also allow unlocking if Anna typed her superuser email + the studio master password
+      if (loginPassword !== confirmPassword) {
+        setLoginError('Passwords do not match. Please double-check both password fields.');
+        return;
+      }
+
+      setAuthSubmitting(true);
+      try {
+        const { data, error } = await supabase.auth.signUp({
+          email: normalizedEmail,
+          password: loginPassword,
+          options: {
+            emailRedirectTo: `${baseUrl}?auth_intent=signup`,
+            data: {
+              sa_registered: true,
+              sa_registered_at: new Date().toISOString(),
+            },
+          },
+        });
+
+        if (error) {
+          setLoginError(error.message);
+          return;
+        }
+
+        // Supabase returns empty identities array if email is already registered
+        if (data?.user && Array.isArray(data.user.identities) && data.user.identities.length === 0) {
+          setAuthMode('signin');
+          setLoginPassword('');
+          setConfirmPassword('');
+          setLoginError(
+            `An account with ${normalizedEmail} already exists. Please sign in here (or use Google if you registered with Google)!`
+          );
+          return;
+        }
+
+        if (data?.session && data?.user) {
+          verifiedUserIdsRef.current.add(data.user.id);
+          sessionStorage.setItem('sa_user_email', normalizedEmail);
+          setCurrentUserEmail(normalizedEmail);
+          setIsAuthenticated(true);
+          setLoginPassword('');
+          setConfirmPassword('');
+          await fetchAll(normalizedEmail);
+          triggerFairyWand();
+          showToast(`Account created! Welcome, ${normalizedEmail}`);
+          return;
+        }
+
+        setAuthMode('signin');
+        setLoginPassword('');
+        setConfirmPassword('');
+        setLoginInfo(
+          `Verification link sent to ${normalizedEmail}! Click the link in your email inbox to finish signing up, then sign in below.`
+        );
+      } finally {
+        setAuthSubmitting(false);
+      }
+      return;
     }
 
-    // 2. Verify SHA-256 Studio Password (works for handle 'techfairyanna' or superuser email)
-    const raw = `techfairyanna:${loginPassword}`;
-    const msgBuffer = new TextEncoder().encode(raw);
-    const hashBuffer = await crypto.subtle.digest('SHA-256', msgBuffer);
-    const hashHex = Array.from(new Uint8Array(hashBuffer))
-      .map((b) => b.toString(16).padStart(2, '0'))
-      .join('');
+    // Sign In Mode — strictly requires an existing registered account
+    setAuthSubmitting(true);
+    try {
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: normalizedEmail,
+        password: loginPassword,
+      });
 
-    const expectedHash =
-      localStorage.getItem('sa_custom_pass_hash') ||
-      'eb041c7ded7b3a19c0066954e0300257244c0c807c93e64a596d5808cda24172';
+      if (error || !data?.user) {
+        const msg = (error?.message || '').toLowerCase();
+        if (msg.includes('email not confirmed')) {
+          setLoginError(
+            `Please confirm your email first — check ${normalizedEmail} for your verification link before signing in.`
+          );
+        } else {
+          setLoginError(
+            'No matching account or wrong password. Only users who have signed up can sign in — switch to Sign Up above to create an account first!'
+          );
+        }
+        return;
+      }
 
-    const validIdentity =
-      userOrEmail === 'techfairyanna' || isSuperuserEmail(userOrEmail);
+      verifiedUserIdsRef.current.add(data.user.id);
+      if (data.user.user_metadata?.sa_registered !== true) {
+        supabase.auth
+          .updateUser({
+            data: {
+              sa_registered: true,
+              sa_registered_at: new Date().toISOString(),
+            },
+          })
+          .catch(() => {});
+      }
 
-    if (validIdentity && hashHex === expectedHash) {
-      const studioOwnerId = userOrEmail || 'techfairyanna';
-      sessionStorage.setItem('sa_authenticated', 'true');
-      sessionStorage.setItem('sa_user_email', studioOwnerId);
-      setCurrentUserEmail(studioOwnerId);
+      sessionStorage.setItem('sa_user_email', normalizedEmail);
+      setCurrentUserEmail(normalizedEmail);
       setIsAuthenticated(true);
       setLoginPassword('');
-      await fetchAll(studioOwnerId);
+      setConfirmPassword('');
+      await fetchAll(normalizedEmail);
       triggerFairyWand();
-    } else {
-      setLoginError(
-        userOrEmail.includes('@')
-          ? 'Invalid email or password — click "Create Account" below if this is your first time signing in with email!'
-          : 'Invalid credentials. Sign in with Google, email, or studio password.'
-      );
+    } finally {
+      setAuthSubmitting(false);
     }
   };
 
-  const handleLockStudio = async () => {
+  const handleSignOut = async () => {
+    signingOutGuardRef.current = true;
+    clearOAuthIntent();
     sessionStorage.removeItem('sa_authenticated');
     sessionStorage.removeItem('sa_user_email');
     setCurrentUserEmail('');
     await supabase.auth.signOut().catch(() => {});
+    signingOutGuardRef.current = false;
     setIsAuthenticated(false);
+    setAuthMode('signin');
+    setLoginPassword('');
+    setConfirmPassword('');
+    setLoginError('');
+    setLoginInfo('You have been signed out.');
   };
 
+  if (authChecking) {
+    return (
+      <div className="min-h-screen bg-[#FFF8FC] text-[#19154E] flex items-center justify-center p-4">
+        <div className="editorial-card px-8 py-6 flex items-center gap-4 bg-white">
+          <RefreshCw className="w-6 h-6 animate-spin text-[#FF7EB6]" />
+          <span className="font-display text-lg font-bold">
+            Verifying SocialAssist account...
+          </span>
+        </div>
+      </div>
+    );
+  }
+
   if (!isAuthenticated) {
+    const isSignUp = authMode === 'signup';
     return (
       <div className="min-h-screen bg-[#FFF8FC] text-[#19154E] flex items-center justify-center p-4">
         <div className="editorial-card max-w-md w-full p-7 sm:p-8 bg-white space-y-5 panel-enter">
           <div className="flex flex-col items-center text-center space-y-2">
-            <div className="w-48 h-48">
+            <div className="w-40 h-40">
               <TechFairyCharacter isCasting={false} />
             </div>
             <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#FFE4F1] border-2 border-[#19154E] text-xs font-bold">
               <ShieldCheck className="w-4 h-4 text-[#19154E]" />
-              <span>Multi-Account Creator Studio</span>
+              <span>Members-Only Creator Studio</span>
             </span>
             <h1 className="font-display text-2xl sm:text-3xl font-bold text-[#19154E]">
-              SocialAssist Login
+              {isSignUp ? 'Sign Up for SocialAssist' : 'Sign In to SocialAssist'}
             </h1>
             <p className="text-xs text-neutral-600 font-medium">
-              Sign in with any Google account or email — each login gets its own separate Instagram workspace, live stats, and DM automations.
+              {isSignUp
+                ? 'Create your SocialAssist account with Google or Email. Each account gets its own isolated Instagram workspace.'
+                : 'Sign in with a registered Google or Email account. New here? Switch to Sign Up first!'}
             </p>
+          </div>
+
+          {/* Explicit Sign In / Sign Up Tab Bar */}
+          <div className="grid grid-cols-2 gap-1.5 p-1.5 rounded-2xl bg-[#F5EEFF] border-2 border-[#19154E]">
+            <button
+              type="button"
+              onClick={() => switchAuthTab('signin')}
+              className={`flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl text-xs sm:text-sm font-display font-bold transition-colors duration-150 ${
+                !isSignUp
+                  ? 'bg-[#19154E] text-[#FFF8FC] shadow-[2px_2px_0px_#FF7EB6]'
+                  : 'text-[#19154E] hover:bg-white/80'
+              }`}
+            >
+              <LogIn className="w-4 h-4" />
+              <span>Sign In</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => switchAuthTab('signup')}
+              className={`flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl text-xs sm:text-sm font-display font-bold transition-colors duration-150 ${
+                isSignUp
+                  ? 'bg-[#19154E] text-[#FFF8FC] shadow-[2px_2px_0px_#C8F904]'
+                  : 'text-[#19154E] hover:bg-white/80'
+              }`}
+            >
+              <UserPlus className="w-4 h-4" />
+              <span>Sign Up</span>
+            </button>
           </div>
 
           {loginError && (
@@ -810,11 +1043,16 @@ export default function App() {
             </div>
           )}
 
-          {/* 1-Click Google Sign-In via Supabase OAuth (Always prompts account picker) */}
+          {/* Dedicated Google Sign In vs Google Sign Up Button */}
           <button
             type="button"
-            onClick={handleGoogleSignIn}
-            className="w-full editorial-btn py-3 px-4 rounded-2xl bg-white hover:bg-[#FFF8FC] text-[#19154E] font-display font-bold text-sm flex items-center justify-center gap-3"
+            disabled={authSubmitting}
+            onClick={() => handleGoogleAuth(isSignUp ? 'signup' : 'signin')}
+            className={`w-full editorial-btn py-3 px-4 rounded-2xl font-display font-bold text-sm flex items-center justify-center gap-3 disabled:opacity-60 ${
+              isSignUp
+                ? 'bg-[#C8F904] hover:bg-[#d4ff2a] text-[#19154E]'
+                : 'bg-white hover:bg-[#FFF8FC] text-[#19154E]'
+            }`}
           >
             <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24" aria-hidden="true">
               <path
@@ -834,26 +1072,26 @@ export default function App() {
                 d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.31 0 3.26 2.7 1.29 6.62l3.99 3.14c.95-2.85 3.6-4.96 6.72-4.96z"
               />
             </svg>
-            <span>Choose Google Account</span>
+            <span>{isSignUp ? 'Sign up with Google' : 'Sign in with Google'}</span>
           </button>
 
           <div className="relative flex py-1 items-center">
             <div className="flex-grow border-t-2 border-dashed border-neutral-300" />
             <span className="flex-shrink mx-3 text-[11px] font-bold uppercase tracking-wider text-neutral-500">
-              or Email / Studio Key
+              {isSignUp ? 'or Sign Up with Email' : 'or Sign In with Email'}
             </span>
             <div className="flex-grow border-t-2 border-dashed border-neutral-300" />
           </div>
 
-          <form onSubmit={handleAdminLogin} className="space-y-3.5">
+          <form onSubmit={handleEmailAuth} className="space-y-3.5">
             <div>
               <label className="block text-xs font-bold text-[#19154E] mb-1">
-                Email Address (or Studio Handle)
+                Email Address
               </label>
               <input
-                type="text"
+                type="email"
                 required
-                placeholder="you@gmail.com"
+                placeholder="you@example.com"
                 value={loginUser}
                 onChange={(e) => setLoginUser(e.target.value)}
                 className="w-full px-3.5 py-2.5 rounded-xl bg-[#FFF8FC] border-2 border-[#19154E] text-sm font-bold focus:outline-none focus:bg-white"
@@ -862,11 +1100,12 @@ export default function App() {
 
             <div>
               <label className="block text-xs font-bold text-[#19154E] mb-1">
-                Password
+                {isSignUp ? 'Create Password (min. 6 characters)' : 'Password'}
               </label>
               <input
                 type="password"
                 required
+                minLength={isSignUp ? 6 : 1}
                 placeholder="••••••••••••"
                 value={loginPassword}
                 onChange={(e) => setLoginPassword(e.target.value)}
@@ -874,27 +1113,49 @@ export default function App() {
               />
             </div>
 
+            {isSignUp && (
+              <div>
+                <label className="block text-xs font-bold text-[#19154E] mb-1">
+                  Confirm Password
+                </label>
+                <input
+                  type="password"
+                  required
+                  minLength={6}
+                  placeholder="••••••••••••"
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-[#FFF8FC] border-2 border-[#19154E] text-sm font-mono-code focus:outline-none focus:bg-white"
+                />
+              </div>
+            )}
+
             <button
               type="submit"
-              className="w-full editorial-btn py-3 rounded-2xl bg-[#FF7EB6] text-[#19154E] font-display font-bold text-sm flex items-center justify-center gap-2"
+              disabled={authSubmitting}
+              className="w-full editorial-btn py-3 rounded-2xl bg-[#FF7EB6] text-[#19154E] font-display font-bold text-sm flex items-center justify-center gap-2 disabled:opacity-60"
             >
-              <KeyRound className="w-4 h-4" />
-              <span>{isSignUpMode ? 'Create Account ✨' : 'Sign In ✨'}</span>
+              {isSignUp ? <UserPlus className="w-4 h-4" /> : <LogIn className="w-4 h-4" />}
+              <span>
+                {authSubmitting
+                  ? isSignUp
+                    ? 'Creating Account...'
+                    : 'Signing In...'
+                  : isSignUp
+                  ? 'Sign Up with Email ✨'
+                  : 'Sign In with Email ✨'}
+              </span>
             </button>
 
             <div className="text-center pt-0.5">
               <button
                 type="button"
-                onClick={() => {
-                  setIsSignUpMode((prev) => !prev);
-                  setLoginError('');
-                  setLoginInfo('');
-                }}
+                onClick={() => switchAuthTab(isSignUp ? 'signin' : 'signup')}
                 className="text-xs font-bold text-[#19154E] underline hover:opacity-80"
               >
-                {isSignUpMode
-                  ? 'Already have an account? Sign in instead'
-                  : 'New email account? Create Account'}
+                {isSignUp
+                  ? 'Already signed up? Sign In here'
+                  : "Don't have an account yet? Sign Up first"}
               </button>
             </div>
           </form>
@@ -1124,11 +1385,16 @@ export default function App() {
               />
             </button>
             <button
-              onClick={handleLockStudio}
-              title={currentUserEmail ? `Signed in as ${currentUserEmail} — click to switch Google account` : 'Switch Account / Sign Out'}
-              className="px-2.5 py-2 rounded-xl text-xs font-bold text-[#19154E] bg-white/80 hover:bg-[#FFE4F1] border border-[#19154E]/30 transition-colors duration-150"
+              onClick={handleSignOut}
+              title={
+                currentUserEmail
+                  ? `Signed in as ${currentUserEmail} — click to sign out`
+                  : 'Sign Out'
+              }
+              className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold text-[#19154E] bg-white hover:bg-[#FFE4F1] border-2 border-[#19154E] transition-colors duration-150"
             >
-              Switch Account
+              <LogOut className="w-3.5 h-3.5 text-[#FF7EB6]" />
+              <span>Sign Out</span>
             </button>
           </nav>
         </div>

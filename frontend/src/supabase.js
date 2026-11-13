@@ -7,9 +7,19 @@ export const SUPABASE_PUBLISHABLE_KEY =
   import.meta.env.VITE_SUPABASE_ANON_KEY ||
   'sb_publishable_zAgfHOr1r2UmatFiZv8Eiw_Fh4Vos2y';
 
-// Clean up any legacy auth token from the old shared project
-if (typeof window !== 'undefined' && window.localStorage) {
+// Capture OAuth intent ('signin' | 'signup') BEFORE createClient() inspects or strips URL parameters
+let initialUrlIntent = '';
+if (typeof window !== 'undefined') {
   try {
+    const params = new URLSearchParams(window.location.search);
+    initialUrlIntent = params.get('auth_intent') || '';
+  } catch {
+    // ignore URL parse errors
+  }
+
+  // Clean up any legacy auth tokens or old session bypass flags
+  try {
+    window.sessionStorage?.removeItem('sa_authenticated');
     Object.keys(window.localStorage).forEach((k) => {
       if (k.includes('xfyaizroguvnlekxuouu')) {
         window.localStorage.removeItem(k);
@@ -18,6 +28,54 @@ if (typeof window !== 'undefined' && window.localStorage) {
   } catch {
     // ignore storage errors
   }
+}
+
+export function peekOAuthIntent() {
+  if (initialUrlIntent === 'signin' || initialUrlIntent === 'signup') {
+    return initialUrlIntent;
+  }
+  if (typeof window !== 'undefined') {
+    try {
+      const fromUrl = new URLSearchParams(window.location.search).get('auth_intent');
+      if (fromUrl === 'signin' || fromUrl === 'signup') return fromUrl;
+      const raw = window.localStorage.getItem('sa_oauth_intent');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (
+          parsed &&
+          (parsed.intent === 'signin' || parsed.intent === 'signup') &&
+          Date.now() - (parsed.ts || 0) < 10 * 60 * 1000
+        ) {
+          return parsed.intent;
+        }
+      }
+    } catch {
+      // ignore storage errors
+    }
+  }
+  return '';
+}
+
+export function setOAuthIntent(intent) {
+  initialUrlIntent = intent || '';
+  if (typeof window !== 'undefined') {
+    try {
+      if (intent) {
+        window.localStorage.setItem(
+          'sa_oauth_intent',
+          JSON.stringify({ intent, ts: Date.now() })
+        );
+      } else {
+        window.localStorage.removeItem('sa_oauth_intent');
+      }
+    } catch {
+      // ignore storage errors
+    }
+  }
+}
+
+export function clearOAuthIntent() {
+  setOAuthIntent('');
 }
 
 export const supabase = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
