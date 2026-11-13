@@ -374,15 +374,15 @@ export default function App() {
     setAutomations(savedFlows);
     setLogs(savedLogs);
 
-    const connectedPlatformIds = PLATFORMS.map((p) => p.id).filter((pid) => cMap[pid]?.handle);
-    const initialConnectPlat = connectedPlatformIds[0] || 'instagram';
+    const connectedIdsInitial = PLATFORMS.map((p) => p.id).filter((pid) => cMap[pid]?.handle);
+    const initialConnectPlat = connectedIdsInitial[0] || 'instagram';
     setConnectPlatform(initialConnectPlat);
     const initHandle = cMap[initialConnectPlat]?.handle || '';
     setHandleInput(
       initHandle ? PLATFORM_BY_ID[initialConnectPlat].buildProfileUrl(initHandle) : ''
     );
 
-    if (connectedPlatformIds.length === 0) {
+    if (connectedIdsInitial.length === 0) {
       setSelectedPlatform('instagram');
       setActiveTab('connect');
       setAnalyticsByPlatform({});
@@ -391,15 +391,30 @@ export default function App() {
       return;
     }
 
-    setSelectedPlatform(connectedPlatformIds.length > 1 ? 'all' : connectedPlatformIds[0]);
+    // Auto-link Threads through connected Instagram account unless user explicitly disconnected Threads
+    const shouldAutoLinkThreads =
+      Boolean(cMap.instagram?.handle) &&
+      !cMap.threads?.handle &&
+      !localStorage.getItem(scopedKey('sa_threads_auto_optout', emailOverride));
+
+    const fetchTargets = [...connectedIdsInitial];
+    if (shouldAutoLinkThreads && !fetchTargets.includes('threads')) {
+      fetchTargets.push('threads');
+    }
+
+    setSelectedPlatform(connectedIdsInitial.length > 1 ? 'all' : connectedIdsInitial[0]);
 
     try {
       const results = await Promise.all(
-        connectedPlatformIds.map(async (pid) => {
+        fetchTargets.map(async (pid) => {
           try {
+            const handleForPid =
+              pid === 'threads' && shouldAutoLinkThreads
+                ? cMap.instagram.handle
+                : cMap[pid]?.handle;
             const res = await fetchPlatformAnalytics({
               platformId: pid,
-              overrideHandle: cMap[pid].handle,
+              overrideHandle: handleForPid,
               forceRefresh: false,
               emailOverride,
             });
@@ -410,12 +425,35 @@ export default function App() {
         })
       );
       const nextAnalytics = {};
+      let updatedConns = { ...cMap };
       for (const [pid, res] of results) {
-        if (res) nextAnalytics[pid] = res;
+        if (res) {
+          nextAnalytics[pid] = res;
+          if (pid === 'threads' && shouldAutoLinkThreads && res.profile?.username) {
+            updatedConns = {
+              ...updatedConns,
+              threads: {
+                handle: res.profile.username,
+                has_access_token: false,
+                linked_via: 'instagram',
+                connected_at: new Date().toISOString(),
+              },
+            };
+            localStorage.setItem(
+              scopedKey('sa_connections_map', emailOverride),
+              JSON.stringify(updatedConns)
+            );
+            setConnectionsMap(updatedConns);
+          }
+        }
       }
       setAnalyticsByPlatform(nextAnalytics);
-      const nextSelected = connectedPlatformIds.length > 1 ? 'all' : connectedPlatformIds[0];
-      const snap = getActiveAnalyticsSnapshot(nextAnalytics, cMap, nextSelected);
+      const finalConnectedIds = PLATFORMS.map((p) => p.id).filter(
+        (pid) => updatedConns[pid]?.handle
+      );
+      const nextSelected = finalConnectedIds.length > 1 ? 'all' : finalConnectedIds[0];
+      setSelectedPlatform(nextSelected);
+      const snap = getActiveAnalyticsSnapshot(nextAnalytics, updatedConns, nextSelected);
       setOpenclawOutput(runLocalOpenClawAnalysis(openclawPrompt, snap));
     } finally {
       setLoading(false);
@@ -633,8 +671,84 @@ export default function App() {
     setConnectPlatform(meta.id);
     setConnectStatusMsg(null);
     setTokenInput('');
-    const existingHandle = connectionsMap[meta.id]?.handle || '';
+    const existingHandle =
+      connectionsMap[meta.id]?.handle ||
+      (meta.id === 'threads' ? connectionsMap.instagram?.handle || '' : '');
     setHandleInput(existingHandle ? meta.buildProfileUrl(existingHandle) : '');
+  };
+
+  const tryAutoLinkThreadsForInstagramHandle = async (igHandle, baseConnsMap) => {
+    if (!igHandle) return { conns: baseConnsMap, threadsAnalytics: null };
+    if (baseConnsMap.threads?.handle && baseConnsMap.threads?.linked_via !== 'instagram') {
+      return { conns: baseConnsMap, threadsAnalytics: null };
+    }
+    try {
+      const thAna = await fetchPlatformAnalytics({
+        platformId: 'threads',
+        overrideHandle: igHandle,
+        forceRefresh: true,
+      });
+      if (thAna?.profile?.username) {
+        localStorage.removeItem(scopedKey('sa_threads_auto_optout'));
+        const updated = {
+          ...baseConnsMap,
+          threads: {
+            handle: thAna.profile.username,
+            has_access_token: false,
+            linked_via: 'instagram',
+            connected_at: new Date().toISOString(),
+          },
+        };
+        localStorage.setItem(scopedKey('sa_connections_map'), JSON.stringify(updated));
+        return { conns: updated, threadsAnalytics: thAna };
+      }
+    } catch {
+      // Optional auto-link if creator also has a public Threads profile
+    }
+    return { conns: baseConnsMap, threadsAnalytics: null };
+  };
+
+  const handleAutoConnectThreadsFromInstagram = async () => {
+    const igHandle = connectionsMap.instagram?.handle;
+    if (!igHandle) return;
+    setSyncing(true);
+    setConnectStatusMsg(null);
+    try {
+      localStorage.removeItem(scopedKey('sa_threads_auto_optout'));
+      const cMap = loadSavedConnectionsMap();
+      const thAna = await fetchPlatformAnalytics({
+        platformId: 'threads',
+        overrideHandle: igHandle,
+        forceRefresh: true,
+      });
+      const resolvedHandle = thAna?.profile?.username || igHandle;
+      const nextConns = {
+        ...cMap,
+        threads: {
+          handle: resolvedHandle,
+          has_access_token: false,
+          linked_via: 'instagram',
+          connected_at: new Date().toISOString(),
+        },
+      };
+      localStorage.setItem(scopedKey('sa_connections_map'), JSON.stringify(nextConns));
+      setConnectionsMap(nextConns);
+      setHandleInput(PLATFORM_BY_ID.threads.buildProfileUrl(resolvedHandle));
+      setSelectedPlatform('threads');
+      setOpenclawOutput(runLocalOpenClawAnalysis(openclawPrompt, thAna || EMPTY_WORKSPACE_ANALYTICS));
+      setConnectStatusMsg({
+        type: 'success',
+        text: `Auto-connected Threads (@${resolvedHandle}) through your Instagram account!`,
+      });
+      showToast(`Connected Threads (@${resolvedHandle}) via Instagram!`);
+      setActiveTab('analytics');
+      triggerFairyWand();
+    } catch (err) {
+      setConnectStatusMsg({ type: 'error', text: err.message });
+      showToast(err.message, 'error');
+    } finally {
+      setSyncing(false);
+    }
   };
 
   const handleConnectAndRedirect = async (e) => {
@@ -716,7 +830,7 @@ export default function App() {
           localStorage.setItem(scopedKey('sa_ig_access_token'), cleanToken);
         }
 
-        const nextConns = {
+        let nextConns = {
           ...cMap,
           [meta.id]: {
             handle: finalHandle,
@@ -735,6 +849,8 @@ export default function App() {
               account_id: liveAna.profile?.account_id || '',
             })
           );
+          const autoThreads = await tryAutoLinkThreadsForInstagramHandle(finalHandle, nextConns);
+          nextConns = autoThreads.conns;
         }
 
         setConnectionsMap(nextConns);
@@ -763,7 +879,11 @@ export default function App() {
         });
         const resolvedHandle = liveAna?.profile?.username || cleanHandle;
 
-        const nextConns = {
+        if (meta.id === 'threads') {
+          localStorage.removeItem(scopedKey('sa_threads_auto_optout'));
+        }
+
+        let nextConns = {
           ...cMap,
           [meta.id]: {
             handle: resolvedHandle,
@@ -780,16 +900,26 @@ export default function App() {
               has_access_token: Boolean(tMap.instagram),
             })
           );
+          const autoThreads = await tryAutoLinkThreadsForInstagramHandle(resolvedHandle, nextConns);
+          nextConns = autoThreads.conns;
         }
         setConnectionsMap(nextConns);
         setHandleInput(meta.buildProfileUrl(resolvedHandle));
         setSelectedPlatform(meta.id);
         setOpenclawOutput(runLocalOpenClawAnalysis(openclawPrompt, liveAna || EMPTY_WORKSPACE_ANALYTICS));
+        const threadsAutoLinked =
+          meta.id === 'instagram' && nextConns.threads?.linked_via === 'instagram';
         setConnectStatusMsg({
           type: 'success',
-          text: `Redirected to ${meta.name} & synced live stats for @${resolvedHandle}!`,
+          text: threadsAutoLinked
+            ? `Redirected to Instagram & synced live stats for @${resolvedHandle} (+ auto-connected Threads)!`
+            : `Redirected to ${meta.name} & synced live stats for @${resolvedHandle}!`,
         });
-        showToast(`Connected ${meta.name} & pulled live stats for @${resolvedHandle}!`);
+        showToast(
+          threadsAutoLinked
+            ? `Connected Instagram & auto-linked Threads for @${resolvedHandle}!`
+            : `Connected ${meta.name} & pulled live stats for @${resolvedHandle}!`
+        );
         setActiveTab('analytics');
         triggerFairyWand();
       }
@@ -812,6 +942,9 @@ export default function App() {
     if (meta.id === 'instagram') {
       localStorage.removeItem(scopedKey('sa_connection'));
       localStorage.removeItem(scopedKey('sa_ig_access_token'));
+    }
+    if (meta.id === 'threads') {
+      localStorage.setItem(scopedKey('sa_threads_auto_optout'), '1');
     }
     setConnectionsMap({ ...cMap });
     if (connectPlatform === meta.id) {
@@ -4011,6 +4144,35 @@ export default function App() {
 
               {/* Single Unified Connect & Redirect Form for Selected Platform */}
               <form onSubmit={handleConnectAndRedirect} className="space-y-4">
+                {connectMeta.id === 'threads' && connectionsMap.instagram?.handle && (
+                  <div className="p-4 rounded-2xl bg-[#EDE9FE] border-2 border-[#19154E] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div className="text-xs font-bold text-[#19154E]">
+                      <span className="inline-flex items-center gap-1.5 text-[#6D28D9]">
+                        <Sparkles className="w-3.5 h-3.5" />
+                        <span>Instagram ↔ Threads Auto-Sync</span>
+                      </span>
+                      <p className="text-[11px] font-medium text-neutral-700 mt-0.5">
+                        {connectionsMap.threads?.handle?.toLowerCase() ===
+                        connectionsMap.instagram.handle.toLowerCase()
+                          ? `Your Threads account @${connectionsMap.threads.handle} is automatically linked through your connected Instagram.`
+                          : `Instagram @${connectionsMap.instagram.handle} is connected — link your matching Threads account automatically in one click:`}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={syncing}
+                      data-testid="auto-connect-threads-ig-btn"
+                      onClick={handleAutoConnectThreadsFromInstagram}
+                      className="editorial-btn px-4 py-2 rounded-xl bg-[#B799E8] text-[#19154E] text-xs font-bold shrink-0"
+                    >
+                      {connectionsMap.threads?.handle?.toLowerCase() ===
+                      connectionsMap.instagram.handle.toLowerCase()
+                        ? `Re-Sync @${connectionsMap.instagram.handle} Threads`
+                        : `✨ Auto-Connect @${connectionsMap.instagram.handle}`}
+                    </button>
+                  </div>
+                )}
+
                 <div className="p-5 rounded-2xl bg-[#FFF8FC] border-2 border-[#19154E] space-y-3">
                   <div className="flex items-center justify-between gap-2">
                     <label className="text-sm font-display font-bold text-[#19154E] flex items-center gap-2">

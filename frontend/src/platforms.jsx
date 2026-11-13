@@ -96,11 +96,12 @@ export const PLATFORMS = [
     contentLabel: 'Threads',
     badgeBg: '#B799E8',
     badgeText: '#19154E',
-    placeholder: 'https://www.threads.net/@your_handle or @your_handle',
+    placeholder: 'https://www.threads.com/@your_handle or @your_handle',
     tokenLabel: 'Optional Threads Graph API Token',
     tokenPlaceholder: 'THQW...',
-    buildProfileUrl: (h) => `https://www.threads.net/@${encodeURIComponent(h)}`,
-    buildLoginUrl: () => 'https://www.threads.net/login',
+    buildProfileUrl: (h) => `https://www.threads.com/@${encodeURIComponent(h)}`,
+    buildLoginUrl: (h) =>
+      h ? `https://www.threads.com/@${encodeURIComponent(h)}` : 'https://www.threads.com/login',
   },
 ];
 
@@ -138,13 +139,16 @@ const RESERVED_SOCIAL_PATHS = new Set([
 
 const KNOWN_SOCIAL_DOMAINS = [
   'instagram.com',
+  'instagr.am',
   'tiktok.com',
   'youtube.com',
   'youtu.be',
   'facebook.com',
   'fb.com',
+  'fb.watch',
   'x.com',
   'twitter.com',
+  'threads.com',
   'threads.net',
 ];
 
@@ -210,11 +214,11 @@ export function extractHandleForPlatform(raw) {
     try {
       const normalized = /^https?:\/\//i.test(s) ? s : `https://${s}`;
       const u = new URL(normalized);
+      const parts = u.pathname
+        .split('/')
+        .map((p) => decodeURIComponent(p).trim())
+        .filter(Boolean);
       if (isBareSocialDomain(u.hostname)) {
-        const parts = u.pathname
-          .split('/')
-          .map((p) => decodeURIComponent(p).trim())
-          .filter(Boolean);
         if (parts.length === 0) {
           return '';
         }
@@ -222,12 +226,17 @@ export function extractHandleForPlatform(raw) {
           const ch = parts[1].replace(/^@+\s*/, '').trim();
           return RESERVED_SOCIAL_PATHS.has(ch.toLowerCase()) ? '' : ch;
         }
-        // Support URLs like https://www.tiktok.com/@username/video/123456
+        // Support URLs like https://www.tiktok.com/@username/video/123456 or https://www.threads.com/@username
         const first = parts[0].replace(/^@+\s*/, '').trim();
         if (!first || RESERVED_SOCIAL_PATHS.has(first.toLowerCase())) {
           return '';
         }
         return first;
+      }
+      // Universal fallback: any URL with an explicit /@handle segment
+      const atSegment = parts.find((p) => p.startsWith('@') && p.length > 1);
+      if (atSegment) {
+        return atSegment.replace(/^@+\s*/, '').trim();
       }
     } catch {
       return '';
