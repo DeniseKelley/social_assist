@@ -20,6 +20,7 @@ import {
   TrendingUp,
   Bookmark,
   Eye,
+  EyeOff,
   MessageCircle,
   LogIn,
   UserPlus,
@@ -44,6 +45,7 @@ import {
   setOAuthIntent,
   clearOAuthIntent,
 } from './supabase';
+import PoliciesModal from './PoliciesModal';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('automations'); // 'automations' | 'analytics' | 'strategy' | 'connect'
@@ -60,10 +62,19 @@ export default function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [authChecking, setAuthChecking] = useState(true);
   const [currentUserEmail, setCurrentUserEmail] = useState('');
+  const [currentUsername, setCurrentUsername] = useState('');
   const [authMode, setAuthMode] = useState('signin'); // 'signin' | 'signup'
+  const [signupUsername, setSignupUsername] = useState('');
   const [loginUser, setLoginUser] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [agreedToTerms, setAgreedToTerms] = useState(false);
+  const [termsHighlight, setTermsHighlight] = useState(false);
+  const [resetMode, setResetMode] = useState(false);
+  const [recoveryMode, setRecoveryMode] = useState(false);
+  const [pendingConfirmEmail, setPendingConfirmEmail] = useState('');
+  const [policiesModal, setPoliciesModal] = useState({ open: false, section: 'terms' });
   const [loginError, setLoginError] = useState('');
   const [loginInfo, setLoginInfo] = useState('');
   const [authSubmitting, setAuthSubmitting] = useState(false);
@@ -349,6 +360,7 @@ export default function App() {
         }
         sessionStorage.removeItem('sa_user_email');
         setCurrentUserEmail('');
+        setCurrentUsername('');
         setIsAuthenticated(false);
         setAuthChecking(false);
         return;
@@ -356,14 +368,30 @@ export default function App() {
 
       const user = session.user;
       const email = (user.email || '').toLowerCase();
+      const resolvedName =
+        user.user_metadata?.username || user.user_metadata?.full_name || user.user_metadata?.name || '';
+
+      // 0. Password Recovery Link Callback -> Let user choose a new password
+      if (event === 'PASSWORD_RECOVERY' || intent === 'recovery') {
+        clearOAuthIntent();
+        setAuthMode('signin');
+        setResetMode(false);
+        setRecoveryMode(true);
+        setIsAuthenticated(false);
+        setAuthChecking(false);
+        setLoginInfo(`Enter a new password for ${email}.`);
+        return;
+      }
 
       // 1. Explicit Sign-Up flow (Google Sign Up or Email Sign Up confirmation link)
       if (intent === 'signup') {
         const alreadyRegistered = user.user_metadata?.sa_registered === true;
+        const nowIso = new Date().toISOString();
         verifiedUserIdsRef.current.add(user.id);
         clearOAuthIntent();
         sessionStorage.setItem('sa_user_email', email);
         setCurrentUserEmail(email);
+        setCurrentUsername(resolvedName);
         setLoginError('');
         setLoginInfo('');
         setIsAuthenticated(true);
@@ -375,13 +403,15 @@ export default function App() {
             .updateUser({
               data: {
                 sa_registered: true,
-                sa_registered_at: new Date().toISOString(),
+                sa_registered_at: nowIso,
+                accepted_terms: true,
+                accepted_terms_date: nowIso,
               },
             })
             .catch(() => {});
-          showToast(`Account created! Welcome, ${email}`);
+          showToast(`Account created! Welcome, ${resolvedName || email}`);
         } else {
-          showToast(`Signed in as ${email}`);
+          showToast(`Logged in as ${resolvedName || email}`);
         }
         return;
       }
@@ -392,12 +422,13 @@ export default function App() {
         signingOutGuardRef.current = true;
         sessionStorage.removeItem('sa_user_email');
         setCurrentUserEmail('');
+        setCurrentUsername('');
         setIsAuthenticated(false);
         if (intent === 'signin') {
           setAuthMode('signup');
           setLoginInfo('');
           setLoginError(
-            `No account found for ${email || 'that Google account'}. Only users who have signed up can sign in — please sign up below first!`
+            `No account found for ${email || 'that Google account'}. Only users who have signed up can log in — please agree to the Terms & Privacy Policy and sign up below first!`
           );
         }
         await supabase.auth.signOut().catch(() => {});
@@ -406,7 +437,7 @@ export default function App() {
         return;
       }
 
-      // 3. Verified Registered Account -> Sign in to their isolated workspace
+      // 3. Verified Registered Account -> Log in to their isolated workspace
       verifiedUserIdsRef.current.add(user.id);
       clearOAuthIntent();
       if (user.user_metadata?.sa_registered !== true) {
@@ -421,6 +452,7 @@ export default function App() {
       }
       sessionStorage.setItem('sa_user_email', email);
       setCurrentUserEmail(email);
+      setCurrentUsername(resolvedName);
       setLoginError('');
       setIsAuthenticated(true);
       setAuthChecking(false);
@@ -774,8 +806,16 @@ export default function App() {
     setTimeout(() => setCopiedField(null), 2000);
   };
 
+  const openPolicies = (section = 'terms') => {
+    setPoliciesModal({ open: true, section });
+  };
+
   const switchAuthTab = (nextMode) => {
     setAuthMode(nextMode);
+    setResetMode(false);
+    setRecoveryMode(false);
+    setPendingConfirmEmail('');
+    setTermsHighlight(false);
     setLoginError('');
     setLoginInfo('');
     setLoginPassword('');
@@ -785,6 +825,16 @@ export default function App() {
   const handleGoogleAuth = async (intent) => {
     setLoginError('');
     setLoginInfo('');
+    setPendingConfirmEmail('');
+
+    // Require legal terms agreement on Sign Up (same policy rule as labfae)
+    if (intent === 'signup' && !agreedToTerms) {
+      setTermsHighlight(true);
+      setLoginError('Please agree to the Terms of Service and Privacy Policy to continue.');
+      return;
+    }
+
+    setTermsHighlight(false);
     setAuthSubmitting(true);
 
     const baseUrl = `${window.location.origin}${window.location.pathname}`;
@@ -826,13 +876,114 @@ export default function App() {
     }
   };
 
+  const handlePasswordResetRequest = async (e) => {
+    e.preventDefault();
+    setLoginError('');
+    setLoginInfo('');
+    const normalizedEmail = loginUser.trim().toLowerCase();
+    if (!normalizedEmail.includes('@') || !normalizedEmail.includes('.')) {
+      setLoginError('Please enter your registered email address first.');
+      return;
+    }
+
+    setAuthSubmitting(true);
+    try {
+      const baseUrl = `${window.location.origin}${window.location.pathname}`;
+      const { error } = await supabase.auth.resetPasswordForEmail(normalizedEmail, {
+        redirectTo: `${baseUrl}?auth_intent=recovery`,
+      });
+      if (error) {
+        setLoginError(error.message);
+      } else {
+        setLoginInfo(`Password reset link sent to ${normalizedEmail}! Check your email inbox.`);
+      }
+    } finally {
+      setAuthSubmitting(false);
+    }
+  };
+
+  const handleSaveRecoveredPassword = async (e) => {
+    e.preventDefault();
+    setLoginError('');
+    setLoginInfo('');
+    if (loginPassword.length < 6) {
+      setLoginError('Password must be at least 6 characters long.');
+      return;
+    }
+    if (loginPassword !== confirmPassword) {
+      setLoginError('Passwords do not match.');
+      return;
+    }
+
+    setAuthSubmitting(true);
+    try {
+      const { data, error } = await supabase.auth.updateUser({
+        password: loginPassword,
+      });
+      if (error) {
+        setLoginError(error.message);
+        return;
+      }
+      const email = (data?.user?.email || loginUser || '').toLowerCase();
+      setRecoveryMode(false);
+      setLoginPassword('');
+      setConfirmPassword('');
+      if (data?.user) {
+        verifiedUserIdsRef.current.add(data.user.id);
+        sessionStorage.setItem('sa_user_email', email);
+        setCurrentUserEmail(email);
+        setCurrentUsername(data.user.user_metadata?.username || '');
+        setIsAuthenticated(true);
+        await fetchAll(email);
+        showToast('Password updated! Welcome back.');
+      } else {
+        setLoginInfo('Password updated! You can now log in.');
+      }
+    } finally {
+      setAuthSubmitting(false);
+    }
+  };
+
+  const handleResendConfirmation = async () => {
+    const targetEmail = pendingConfirmEmail || loginUser.trim().toLowerCase();
+    if (!targetEmail) return;
+    setAuthSubmitting(true);
+    setLoginError('');
+    try {
+      const baseUrl = `${window.location.origin}${window.location.pathname}`;
+      const { error } = await supabase.auth.resend({
+        type: 'signup',
+        email: targetEmail,
+        options: {
+          emailRedirectTo: `${baseUrl}?auth_intent=signup`,
+        },
+      });
+      if (error) {
+        setLoginError(error.message);
+      } else {
+        setPendingConfirmEmail('');
+        setLoginInfo(`Sent a fresh verification link to ${targetEmail}! Check your inbox (and spam folder).`);
+      }
+    } finally {
+      setAuthSubmitting(false);
+    }
+  };
+
   const handleEmailAuth = async (e) => {
     e.preventDefault();
     setLoginError('');
     setLoginInfo('');
+    setPendingConfirmEmail('');
     clearOAuthIntent();
 
     const normalizedEmail = loginUser.trim().toLowerCase();
+    const trimmedUsername = signupUsername.trim();
+
+    if (authMode === 'signup' && !trimmedUsername) {
+      setLoginError('Please enter a username.');
+      return;
+    }
+
     if (!normalizedEmail.includes('@') || !normalizedEmail.includes('.')) {
       setLoginError('Please enter a valid email address.');
       return;
@@ -849,17 +1000,27 @@ export default function App() {
         setLoginError('Passwords do not match. Please double-check both password fields.');
         return;
       }
+      if (!agreedToTerms) {
+        setTermsHighlight(true);
+        setLoginError('Please agree to the Terms of Service and Privacy Policy to continue.');
+        return;
+      }
 
+      setTermsHighlight(false);
       setAuthSubmitting(true);
       try {
+        const nowIso = new Date().toISOString();
         const { data, error } = await supabase.auth.signUp({
           email: normalizedEmail,
           password: loginPassword,
           options: {
             emailRedirectTo: `${baseUrl}?auth_intent=signup`,
             data: {
+              username: trimmedUsername,
               sa_registered: true,
-              sa_registered_at: new Date().toISOString(),
+              sa_registered_at: nowIso,
+              accepted_terms: true,
+              accepted_terms_date: nowIso,
             },
           },
         });
@@ -869,13 +1030,13 @@ export default function App() {
           return;
         }
 
-        // Supabase returns empty identities array if email is already registered
+        // Supabase returns empty identities array if email is already registered (same check as labfae)
         if (data?.user && Array.isArray(data.user.identities) && data.user.identities.length === 0) {
           setAuthMode('signin');
           setLoginPassword('');
           setConfirmPassword('');
           setLoginError(
-            `An account with ${normalizedEmail} already exists. Please sign in here (or use Google if you registered with Google)!`
+            `An account with ${normalizedEmail} already exists. Please log in below (or click "Forgot password?" to reset access).`
           );
           return;
         }
@@ -884,12 +1045,13 @@ export default function App() {
           verifiedUserIdsRef.current.add(data.user.id);
           sessionStorage.setItem('sa_user_email', normalizedEmail);
           setCurrentUserEmail(normalizedEmail);
+          setCurrentUsername(trimmedUsername);
           setIsAuthenticated(true);
           setLoginPassword('');
           setConfirmPassword('');
           await fetchAll(normalizedEmail);
           triggerFairyWand();
-          showToast(`Account created! Welcome, ${normalizedEmail}`);
+          showToast(`Account created! Welcome, ${trimmedUsername}`);
           return;
         }
 
@@ -897,7 +1059,7 @@ export default function App() {
         setLoginPassword('');
         setConfirmPassword('');
         setLoginInfo(
-          `Verification link sent to ${normalizedEmail}! Click the link in your email inbox to finish signing up, then sign in below.`
+          `Account created! Please check ${normalizedEmail} to confirm your email, then log in below.`
         );
       } finally {
         setAuthSubmitting(false);
@@ -905,7 +1067,12 @@ export default function App() {
       return;
     }
 
-    // Sign In Mode — strictly requires an existing registered account
+    // Regular Log In Mode — strictly requires an existing registered account
+    if (!loginPassword) {
+      setLoginError('Please enter your password.');
+      return;
+    }
+
     setAuthSubmitting(true);
     try {
       const { data, error } = await supabase.auth.signInWithPassword({
@@ -916,12 +1083,13 @@ export default function App() {
       if (error || !data?.user) {
         const msg = (error?.message || '').toLowerCase();
         if (msg.includes('email not confirmed')) {
+          setPendingConfirmEmail(normalizedEmail);
           setLoginError(
-            `Please confirm your email first — check ${normalizedEmail} for your verification link before signing in.`
+            `Please confirm your email first — check ${normalizedEmail} for your verification link before logging in.`
           );
         } else {
           setLoginError(
-            'No matching account or wrong password. Only users who have signed up can sign in — switch to Sign Up above to create an account first!'
+            'No matching account or wrong password. Only users who have signed up can log in — switch to Sign Up above to create an account first!'
           );
         }
         return;
@@ -941,6 +1109,9 @@ export default function App() {
 
       sessionStorage.setItem('sa_user_email', normalizedEmail);
       setCurrentUserEmail(normalizedEmail);
+      setCurrentUsername(
+        data.user.user_metadata?.username || data.user.user_metadata?.full_name || ''
+      );
       setIsAuthenticated(true);
       setLoginPassword('');
       setConfirmPassword('');
@@ -957,14 +1128,17 @@ export default function App() {
     sessionStorage.removeItem('sa_authenticated');
     sessionStorage.removeItem('sa_user_email');
     setCurrentUserEmail('');
+    setCurrentUsername('');
     await supabase.auth.signOut().catch(() => {});
     signingOutGuardRef.current = false;
     setIsAuthenticated(false);
     setAuthMode('signin');
+    setResetMode(false);
+    setRecoveryMode(false);
     setLoginPassword('');
     setConfirmPassword('');
     setLoginError('');
-    setLoginInfo('You have been signed out.');
+    setLoginInfo('You have been logged out.');
   };
 
   if (authChecking) {
@@ -984,189 +1158,451 @@ export default function App() {
     const isSignUp = authMode === 'signup';
     return (
       <div className="min-h-screen bg-[#FFF8FC] text-[#19154E] flex items-center justify-center p-4">
-        <div className="editorial-card max-w-md w-full p-7 sm:p-8 bg-white space-y-5 panel-enter">
-          <div className="flex flex-col items-center text-center space-y-2">
-            <div className="w-40 h-40">
+        <PoliciesModal
+          isOpen={policiesModal.open}
+          initialSection={policiesModal.section}
+          onClose={() => setPoliciesModal((prev) => ({ ...prev, open: false }))}
+        />
+
+        <div className="editorial-card max-w-md w-full p-6 sm:p-7 bg-white space-y-4 panel-enter">
+          {/* Compact Studio Header so Regular Form + Google Auth + Policies all fit cleanly */}
+          <div className="flex items-center gap-3.5">
+            <div className="w-16 h-16 shrink-0 rounded-2xl bg-[#FFF8FC] border-2 border-[#19154E] overflow-hidden flex items-center justify-center">
               <TechFairyCharacter isCasting={false} />
             </div>
-            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#FFE4F1] border-2 border-[#19154E] text-xs font-bold">
-              <ShieldCheck className="w-4 h-4 text-[#19154E]" />
-              <span>Members-Only Creator Studio</span>
-            </span>
-            <h1 className="font-display text-2xl sm:text-3xl font-bold text-[#19154E]">
-              {isSignUp ? 'Sign Up for SocialAssist' : 'Sign In to SocialAssist'}
-            </h1>
-            <p className="text-xs text-neutral-600 font-medium">
-              {isSignUp
-                ? 'Create your SocialAssist account with Google or Email. Each account gets its own isolated Instagram workspace.'
-                : 'Sign in with a registered Google or Email account. New here? Switch to Sign Up first!'}
-            </p>
+            <div className="text-left space-y-0.5">
+              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-[#FFE4F1] border border-[#19154E] text-[11px] font-bold">
+                <ShieldCheck className="w-3.5 h-3.5 text-[#19154E]" />
+                <span>SocialAssist Studio</span>
+              </span>
+              <h1 className="font-display text-xl sm:text-2xl font-bold text-[#19154E]">
+                {recoveryMode
+                  ? 'Set New Password'
+                  : resetMode
+                  ? 'Reset Password'
+                  : isSignUp
+                  ? 'Create Account'
+                  : 'Log In'}
+              </h1>
+              <p className="text-xs text-neutral-600 font-medium leading-snug">
+                {recoveryMode
+                  ? 'Choose a new password for your SocialAssist account.'
+                  : resetMode
+                  ? "Enter your email and we'll send you a recovery link."
+                  : isSignUp
+                  ? 'Sign up with Email or Google to unlock your creator workspace.'
+                  : 'Welcome back! Log in with a registered Email or Google account.'}
+              </p>
+            </div>
           </div>
 
-          {/* Explicit Sign In / Sign Up Tab Bar */}
-          <div className="grid grid-cols-2 gap-1.5 p-1.5 rounded-2xl bg-[#F5EEFF] border-2 border-[#19154E]">
-            <button
-              type="button"
-              onClick={() => switchAuthTab('signin')}
-              className={`flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl text-xs sm:text-sm font-display font-bold transition-colors duration-150 ${
-                !isSignUp
-                  ? 'bg-[#19154E] text-[#FFF8FC] shadow-[2px_2px_0px_#FF7EB6]'
-                  : 'text-[#19154E] hover:bg-white/80'
-              }`}
-            >
-              <LogIn className="w-4 h-4" />
-              <span>Sign In</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => switchAuthTab('signup')}
-              className={`flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl text-xs sm:text-sm font-display font-bold transition-colors duration-150 ${
-                isSignUp
-                  ? 'bg-[#19154E] text-[#FFF8FC] shadow-[2px_2px_0px_#C8F904]'
-                  : 'text-[#19154E] hover:bg-white/80'
-              }`}
-            >
-              <UserPlus className="w-4 h-4" />
-              <span>Sign Up</span>
-            </button>
-          </div>
+          {/* Explicit Log In / Sign Up Tab Bar */}
+          {!recoveryMode && (
+            <div className="grid grid-cols-2 gap-1.5 p-1.5 rounded-2xl bg-[#F5EEFF] border-2 border-[#19154E]">
+              <button
+                type="button"
+                data-testid="tab-login"
+                onClick={() => switchAuthTab('signin')}
+                className={`flex items-center justify-center gap-2 py-2 px-3 rounded-xl text-xs sm:text-sm font-display font-bold transition-colors duration-150 ${
+                  !isSignUp
+                    ? 'bg-[#19154E] text-[#FFF8FC] shadow-[2px_2px_0px_#FF7EB6]'
+                    : 'text-[#19154E] hover:bg-white/80'
+                }`}
+              >
+                <LogIn className="w-4 h-4" />
+                <span>Log In</span>
+              </button>
+              <button
+                type="button"
+                data-testid="tab-signup"
+                onClick={() => switchAuthTab('signup')}
+                className={`flex items-center justify-center gap-2 py-2 px-3 rounded-xl text-xs sm:text-sm font-display font-bold transition-colors duration-150 ${
+                  isSignUp
+                    ? 'bg-[#19154E] text-[#FFF8FC] shadow-[2px_2px_0px_#C8F904]'
+                    : 'text-[#19154E] hover:bg-white/80'
+                }`}
+              >
+                <UserPlus className="w-4 h-4" />
+                <span>Sign Up</span>
+              </button>
+            </div>
+          )}
 
           {loginError && (
-            <div className="p-3 rounded-xl bg-[#FFE4F1] border-2 border-[#19154E] text-xs font-bold text-[#19154E] text-center">
-              {loginError}
+            <div
+              role="alert"
+              data-testid="auth-error"
+              className="p-3 rounded-xl bg-[#FFE4F1] border-2 border-[#19154E] text-xs font-bold text-[#19154E] text-center space-y-2"
+            >
+              <div>{loginError}</div>
+              {pendingConfirmEmail && (
+                <button
+                  type="button"
+                  disabled={authSubmitting}
+                  onClick={handleResendConfirmation}
+                  className="px-3 py-1 rounded-lg bg-white border border-[#19154E] text-[11px] font-bold underline hover:bg-[#F5EEFF]"
+                >
+                  Resend verification email
+                </button>
+              )}
             </div>
           )}
 
           {loginInfo && (
-            <div className="p-3 rounded-xl bg-[#E8FFF3] border-2 border-[#19154E] text-xs font-bold text-[#19154E] text-center">
+            <div
+              role="status"
+              data-testid="auth-info"
+              className="p-3 rounded-xl bg-[#E8FFF3] border-2 border-[#19154E] text-xs font-bold text-[#19154E] text-center"
+            >
               {loginInfo}
             </div>
           )}
 
-          {/* Dedicated Google Sign In vs Google Sign Up Button */}
-          <button
-            type="button"
-            disabled={authSubmitting}
-            onClick={() => handleGoogleAuth(isSignUp ? 'signup' : 'signin')}
-            className={`w-full editorial-btn py-3 px-4 rounded-2xl font-display font-bold text-sm flex items-center justify-center gap-3 disabled:opacity-60 ${
-              isSignUp
-                ? 'bg-[#C8F904] hover:bg-[#d4ff2a] text-[#19154E]'
-                : 'bg-white hover:bg-[#FFF8FC] text-[#19154E]'
-            }`}
-          >
-            <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24" aria-hidden="true">
-              <path
-                fill="#4285F4"
-                d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.17z"
-              />
-              <path
-                fill="#34A853"
-                d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.11-6.72-4.96H1.29v3.14C3.26 21.3 7.31 24 12 24z"
-              />
-              <path
-                fill="#FBBC05"
-                d="M5.28 14.24c-.24-.72-.38-1.49-.38-2.24s.14-1.52.38-2.24V6.62H1.29C.47 8.24 0 10.06 0 12s.47 3.76 1.29 5.38l3.99-3.14z"
-              />
-              <path
-                fill="#EA4335"
-                d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.31 0 3.26 2.7 1.29 6.62l3.99 3.14c.95-2.85 3.6-4.96 6.72-4.96z"
-              />
-            </svg>
-            <span>{isSignUp ? 'Sign up with Google' : 'Sign in with Google'}</span>
-          </button>
-
-          <div className="relative flex py-1 items-center">
-            <div className="flex-grow border-t-2 border-dashed border-neutral-300" />
-            <span className="flex-shrink mx-3 text-[11px] font-bold uppercase tracking-wider text-neutral-500">
-              {isSignUp ? 'or Sign Up with Email' : 'or Sign In with Email'}
-            </span>
-            <div className="flex-grow border-t-2 border-dashed border-neutral-300" />
-          </div>
-
-          <form onSubmit={handleEmailAuth} className="space-y-3.5">
-            <div>
-              <label className="block text-xs font-bold text-[#19154E] mb-1">
-                Email Address
-              </label>
-              <input
-                type="email"
-                required
-                placeholder="you@example.com"
-                value={loginUser}
-                onChange={(e) => setLoginUser(e.target.value)}
-                className="w-full px-3.5 py-2.5 rounded-xl bg-[#FFF8FC] border-2 border-[#19154E] text-sm font-bold focus:outline-none focus:bg-white"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs font-bold text-[#19154E] mb-1">
-                {isSignUp ? 'Create Password (min. 6 characters)' : 'Password'}
-              </label>
-              <input
-                type="password"
-                required
-                minLength={isSignUp ? 6 : 1}
-                placeholder="••••••••••••"
-                value={loginPassword}
-                onChange={(e) => setLoginPassword(e.target.value)}
-                className="w-full px-3.5 py-2.5 rounded-xl bg-[#FFF8FC] border-2 border-[#19154E] text-sm font-mono-code focus:outline-none focus:bg-white"
-              />
-            </div>
-
-            {isSignUp && (
+          {/* MODE A: Set New Password after clicking Email Recovery Link */}
+          {recoveryMode ? (
+            <form onSubmit={handleSaveRecoveredPassword} className="space-y-3">
               <div>
                 <label className="block text-xs font-bold text-[#19154E] mb-1">
-                  Confirm Password
+                  New Password (min. 6 characters)
                 </label>
                 <input
                   type="password"
                   required
                   minLength={6}
-                  placeholder="••••••••••••"
+                  placeholder="Enter new password"
+                  value={loginPassword}
+                  onChange={(e) => setLoginPassword(e.target.value)}
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-[#FFF8FC] border-2 border-[#19154E] text-sm font-mono-code focus:outline-none focus:bg-white"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-[#19154E] mb-1">
+                  Confirm New Password
+                </label>
+                <input
+                  type="password"
+                  required
+                  minLength={6}
+                  placeholder="Re-enter new password"
                   value={confirmPassword}
                   onChange={(e) => setConfirmPassword(e.target.value)}
                   className="w-full px-3.5 py-2.5 rounded-xl bg-[#FFF8FC] border-2 border-[#19154E] text-sm font-mono-code focus:outline-none focus:bg-white"
                 />
               </div>
-            )}
+              <button
+                type="submit"
+                disabled={authSubmitting}
+                className="w-full editorial-btn py-3 rounded-2xl bg-[#FF7EB6] text-[#19154E] font-display font-bold text-sm"
+              >
+                {authSubmitting ? 'Saving...' : 'Save New Password →'}
+              </button>
+            </form>
+          ) : resetMode ? (
+            /* MODE B: Forgot Password Request (matches Labfae LogIn.jsx) */
+            <form onSubmit={handlePasswordResetRequest} className="space-y-3">
+              <div>
+                <label className="block text-xs font-bold text-[#19154E] mb-1">
+                  Email Address
+                </label>
+                <input
+                  type="email"
+                  required
+                  placeholder="Enter your registered email"
+                  value={loginUser}
+                  onChange={(e) => setLoginUser(e.target.value)}
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-[#FFF8FC] border-2 border-[#19154E] text-sm font-bold focus:outline-none focus:bg-white"
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={authSubmitting}
+                className="w-full editorial-btn py-3 rounded-2xl bg-[#FF7EB6] text-[#19154E] font-display font-bold text-sm"
+              >
+                {authSubmitting ? 'Sending link...' : 'Send Recovery Link →'}
+              </button>
+              <div className="text-center pt-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setResetMode(false);
+                    setLoginError('');
+                    setLoginInfo('');
+                  }}
+                  className="text-xs font-bold text-[#19154E] underline hover:opacity-80"
+                >
+                  Remembered it? Back to Log In
+                </button>
+              </div>
+            </form>
+          ) : (
+            /* MODE C: Regular Log In / Regular Sign Up + Google Log In / Google Sign Up */
+            <>
+              <form onSubmit={handleEmailAuth} noValidate className="space-y-3">
+                {isSignUp && (
+                  <div>
+                    <label
+                      htmlFor="sa-username"
+                      className="block text-xs font-bold text-[#19154E] mb-1"
+                    >
+                      Username
+                    </label>
+                    <input
+                      id="sa-username"
+                      type="text"
+                      required
+                      placeholder="Enter your username"
+                      value={signupUsername}
+                      onChange={(e) => setSignupUsername(e.target.value)}
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-[#FFF8FC] border-2 border-[#19154E] text-sm font-bold focus:outline-none focus:bg-white"
+                    />
+                  </div>
+                )}
 
-            <button
-              type="submit"
-              disabled={authSubmitting}
-              className="w-full editorial-btn py-3 rounded-2xl bg-[#FF7EB6] text-[#19154E] font-display font-bold text-sm flex items-center justify-center gap-2 disabled:opacity-60"
-            >
-              {isSignUp ? <UserPlus className="w-4 h-4" /> : <LogIn className="w-4 h-4" />}
-              <span>
-                {authSubmitting
-                  ? isSignUp
-                    ? 'Creating Account...'
-                    : 'Signing In...'
-                  : isSignUp
-                  ? 'Sign Up with Email ✨'
-                  : 'Sign In with Email ✨'}
-              </span>
-            </button>
+                <div>
+                  <label htmlFor="sa-email" className="block text-xs font-bold text-[#19154E] mb-1">
+                    Email
+                  </label>
+                  <input
+                    id="sa-email"
+                    type="email"
+                    required
+                    placeholder="Enter your email"
+                    value={loginUser}
+                    onChange={(e) => setLoginUser(e.target.value)}
+                    className="w-full px-3.5 py-2.5 rounded-xl bg-[#FFF8FC] border-2 border-[#19154E] text-sm font-bold focus:outline-none focus:bg-white"
+                  />
+                </div>
 
-            <div className="text-center pt-0.5">
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <label htmlFor="sa-password" className="block text-xs font-bold text-[#19154E]">
+                      Password
+                    </label>
+                    {!isSignUp && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setResetMode(true);
+                          setLoginError('');
+                          setLoginInfo('');
+                        }}
+                        className="text-[11px] font-bold text-[#19154E] underline hover:text-[#FF7EB6]"
+                      >
+                        Forgot password?
+                      </button>
+                    )}
+                  </div>
+                  <div className="relative">
+                    <input
+                      id="sa-password"
+                      type={showPassword ? 'text' : 'password'}
+                      required
+                      minLength={isSignUp ? 6 : 1}
+                      placeholder={isSignUp ? 'Min 6 characters' : 'Enter your password'}
+                      value={loginPassword}
+                      onChange={(e) => setLoginPassword(e.target.value)}
+                      className="w-full pl-3.5 pr-10 py-2.5 rounded-xl bg-[#FFF8FC] border-2 border-[#19154E] text-sm font-mono-code focus:outline-none focus:bg-white"
+                    />
+                    <button
+                      type="button"
+                      tabIndex={-1}
+                      aria-label={showPassword ? 'Hide password' : 'Show password'}
+                      onClick={() => setShowPassword((prev) => !prev)}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-neutral-500 hover:text-[#19154E]"
+                    >
+                      {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
+                </div>
+
+                {isSignUp && (
+                  <div>
+                    <label
+                      htmlFor="sa-confirm-password"
+                      className="block text-xs font-bold text-[#19154E] mb-1"
+                    >
+                      Confirm Password
+                    </label>
+                    <input
+                      id="sa-confirm-password"
+                      type={showPassword ? 'text' : 'password'}
+                      required
+                      minLength={6}
+                      placeholder="Re-enter your password"
+                      value={confirmPassword}
+                      onChange={(e) => setConfirmPassword(e.target.value)}
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-[#FFF8FC] border-2 border-[#19154E] text-sm font-mono-code focus:outline-none focus:bg-white"
+                    />
+                  </div>
+                )}
+
+                {/* Legal Terms Agreement Checkbox on Sign Up (matches Labfae SignUpSupabase.jsx) */}
+                {isSignUp && (
+                  <div
+                    className={`flex items-start gap-2.5 p-2.5 rounded-xl border-2 transition-colors ${
+                      termsHighlight
+                        ? 'bg-[#FFE4F1] border-[#FF2E88]'
+                        : 'bg-[#F5EEFF]/60 border-[#19154E]/30'
+                    }`}
+                  >
+                    <input
+                      id="sa-policy-check"
+                      type="checkbox"
+                      checked={agreedToTerms}
+                      onChange={(e) => {
+                        setAgreedToTerms(e.target.checked);
+                        if (e.target.checked) {
+                          setTermsHighlight(false);
+                          if (loginError.includes('Terms of Service')) {
+                            setLoginError('');
+                          }
+                        }
+                      }}
+                      className="mt-0.5 w-4 h-4 shrink-0 accent-[#FF7EB6] cursor-pointer"
+                    />
+                    <label
+                      htmlFor="sa-policy-check"
+                      className="text-xs text-[#19154E] font-medium leading-snug cursor-pointer"
+                    >
+                      I agree to the{' '}
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          openPolicies('terms');
+                        }}
+                        className="font-bold text-[#19154E] underline hover:text-[#FF7EB6]"
+                      >
+                        Terms of Service
+                      </button>{' '}
+                      and{' '}
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          openPolicies('privacy');
+                        }}
+                        className="font-bold text-[#19154E] underline hover:text-[#FF7EB6]"
+                      >
+                        Privacy Policy
+                      </button>
+                      .
+                    </label>
+                  </div>
+                )}
+
+                <button
+                  type="submit"
+                  data-testid="submit-email-auth"
+                  disabled={authSubmitting}
+                  className="w-full editorial-btn py-3 rounded-2xl bg-[#FF7EB6] text-[#19154E] font-display font-bold text-sm flex items-center justify-center gap-2 disabled:opacity-60"
+                >
+                  {isSignUp ? <UserPlus className="w-4 h-4" /> : <LogIn className="w-4 h-4" />}
+                  <span>
+                    {authSubmitting
+                      ? isSignUp
+                        ? 'Creating account...'
+                        : 'Logging in...'
+                      : isSignUp
+                      ? 'Complete Sign Up →'
+                      : 'Log In →'}
+                  </span>
+                </button>
+              </form>
+
+              <div className="relative flex py-0.5 items-center">
+                <div className="flex-grow border-t-2 border-dashed border-neutral-300" />
+                <span className="flex-shrink mx-3 text-[11px] font-bold uppercase tracking-wider text-neutral-500">
+                  or
+                </span>
+                <div className="flex-grow border-t-2 border-dashed border-neutral-300" />
+              </div>
+
+              {/* Dedicated Google Log In vs Google Sign Up Button */}
               <button
                 type="button"
-                onClick={() => switchAuthTab(isSignUp ? 'signin' : 'signup')}
-                className="text-xs font-bold text-[#19154E] underline hover:opacity-80"
+                data-testid="submit-google-auth"
+                disabled={authSubmitting}
+                onClick={() => handleGoogleAuth(isSignUp ? 'signup' : 'signin')}
+                className={`w-full editorial-btn py-2.5 px-4 rounded-2xl font-display font-bold text-sm flex items-center justify-center gap-3 disabled:opacity-60 ${
+                  isSignUp
+                    ? 'bg-[#C8F904] hover:bg-[#d4ff2a] text-[#19154E]'
+                    : 'bg-white hover:bg-[#FFF8FC] text-[#19154E]'
+                }`}
               >
-                {isSignUp
-                  ? 'Already signed up? Sign In here'
-                  : "Don't have an account yet? Sign Up first"}
+                <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24" aria-hidden="true">
+                  <path
+                    fill="#4285F4"
+                    d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.17z"
+                  />
+                  <path
+                    fill="#34A853"
+                    d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.11-6.72-4.96H1.29v3.14C3.26 21.3 7.31 24 12 24z"
+                  />
+                  <path
+                    fill="#FBBC05"
+                    d="M5.28 14.24c-.24-.72-.38-1.49-.38-2.24s.14-1.52.38-2.24V6.62H1.29C.47 8.24 0 10.06 0 12s.47 3.76 1.29 5.38l3.99-3.14z"
+                  />
+                  <path
+                    fill="#EA4335"
+                    d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.31 0 3.26 2.7 1.29 6.62l3.99 3.14c.95-2.85 3.6-4.96 6.72-4.96z"
+                  />
+                </svg>
+                <span>{isSignUp ? 'Sign up with Google' : 'Log in with Google'}</span>
               </button>
-            </div>
-          </form>
 
-          <div className="pt-2 border-t border-neutral-200 text-center">
-            <a
-              href="../index.html"
-              className="text-xs font-bold text-neutral-500 hover:text-[#19154E]"
-            >
-              ← Return to TechFairyLab
+              <div className="text-center pt-0.5 space-y-1.5">
+                <div>
+                  <span className="text-xs text-neutral-600 font-medium">
+                    {isSignUp ? 'Already have an account? ' : "Don't have an account? "}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => switchAuthTab(isSignUp ? 'signin' : 'signup')}
+                    className="text-xs font-bold text-[#19154E] underline hover:text-[#FF7EB6]"
+                  >
+                    {isSignUp ? 'Log in' : 'Sign up'}
+                  </button>
+                </div>
+
+                {!isSignUp && (
+                  <p className="text-[11px] text-neutral-500">
+                    Protected by our{' '}
+                    <button
+                      type="button"
+                      onClick={() => openPolicies('terms')}
+                      className="font-bold text-[#19154E] underline hover:text-[#FF7EB6]"
+                    >
+                      Terms of Service
+                    </button>{' '}
+                    &amp;{' '}
+                    <button
+                      type="button"
+                      onClick={() => openPolicies('privacy')}
+                      className="font-bold text-[#19154E] underline hover:text-[#FF7EB6]"
+                    >
+                      Privacy Policy
+                    </button>
+                    .
+                  </p>
+                )}
+              </div>
+            </>
+          )}
+
+          <div className="pt-2 border-t border-neutral-200 flex items-center justify-between text-xs font-bold text-neutral-500">
+            <a href="../index.html" className="hover:text-[#19154E]">
+              ← TechFairyLab
             </a>
+            <button
+              type="button"
+              onClick={() => openPolicies('privacy')}
+              className="hover:text-[#19154E] underline"
+            >
+              Legal &amp; Policies
+            </button>
           </div>
         </div>
       </div>
@@ -1325,9 +1761,14 @@ export default function App() {
                   ← TechFairyLab
                 </a>
               </div>
-              <p className="text-xs font-medium text-neutral-600 hidden sm:block">
+              <p
+                data-testid="signed-in-banner"
+                className="text-xs font-medium text-neutral-600 hidden sm:block"
+              >
                 {currentUserEmail
-                  ? `Signed in as ${currentUserEmail}`
+                  ? currentUsername
+                    ? `Signed in as ${currentUsername} (${currentUserEmail})`
+                    : `Signed in as ${currentUserEmail}`
                   : 'Automated Instagram DM Studio & Growth Observatory'}
               </p>
             </div>

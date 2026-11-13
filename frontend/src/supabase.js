@@ -30,20 +30,22 @@ if (typeof window !== 'undefined') {
   }
 }
 
+const VALID_INTENTS = new Set(['signin', 'signup', 'recovery']);
+
 export function peekOAuthIntent() {
-  if (initialUrlIntent === 'signin' || initialUrlIntent === 'signup') {
+  if (VALID_INTENTS.has(initialUrlIntent)) {
     return initialUrlIntent;
   }
   if (typeof window !== 'undefined') {
     try {
       const fromUrl = new URLSearchParams(window.location.search).get('auth_intent');
-      if (fromUrl === 'signin' || fromUrl === 'signup') return fromUrl;
+      if (VALID_INTENTS.has(fromUrl)) return fromUrl;
       const raw = window.localStorage.getItem('sa_oauth_intent');
       if (raw) {
         const parsed = JSON.parse(raw);
         if (
           parsed &&
-          (parsed.intent === 'signin' || parsed.intent === 'signup') &&
+          VALID_INTENTS.has(parsed.intent) &&
           Date.now() - (parsed.ts || 0) < 10 * 60 * 1000
         ) {
           return parsed.intent;
