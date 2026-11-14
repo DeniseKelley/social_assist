@@ -705,23 +705,35 @@ export default function App() {
             JSON.stringify(plannerToks)
           );
 
-          // Sync token to RLS-isolated Supabase row so 24/7 scheduled posts auto-publish!
+          // Sync token to RLS-isolated Supabase `user_platform_tokens` row so 24/7 scheduled posts auto-publish!
           supabase.auth
             .getUser()
-            .then(({ data }) => {
+            .then(async ({ data }) => {
               const uid = data?.user?.id;
-              if (uid) {
-                supabase
+              if (!uid) return;
+              const { data: existing } = await supabase
+                .from('user_platform_tokens')
+                .select('id')
+                .eq('user_id', uid)
+                .eq('platform', meta.id)
+                .maybeSingle();
+              if (existing?.id) {
+                await supabase
                   .from('user_platform_tokens')
-                  .upsert(
-                    {
-                      user_id: uid,
-                      tokens: plannerToks,
-                      updated_at: new Date().toISOString(),
-                    },
-                    { onConflict: 'user_id' }
-                  )
-                  .catch(() => {});
+                  .update({
+                    access_token: cleanTok,
+                    platform_user_id: cleanAccId || null,
+                    updated_at: new Date().toISOString(),
+                  })
+                  .eq('id', existing.id);
+              } else {
+                await supabase.from('user_platform_tokens').insert({
+                  user_id: uid,
+                  platform: meta.id,
+                  access_token: cleanTok,
+                  platform_user_id: cleanAccId || null,
+                  updated_at: new Date().toISOString(),
+                });
               }
             })
             .catch(() => {});
@@ -978,19 +990,33 @@ export default function App() {
         localStorage.setItem(scopedKey('sa_platform_tokens'), JSON.stringify(plannerToks));
         supabase.auth
           .getUser()
-          .then(({ data }) => {
-            if (data?.user?.id) {
-              supabase
+          .then(async ({ data }) => {
+            const uid = data?.user?.id;
+            if (!uid) return;
+            const accId = liveAna.profile?.account_id || null;
+            const { data: existing } = await supabase
+              .from('user_platform_tokens')
+              .select('id')
+              .eq('user_id', uid)
+              .eq('platform', meta.id)
+              .maybeSingle();
+            if (existing?.id) {
+              await supabase
                 .from('user_platform_tokens')
-                .upsert(
-                  {
-                    user_id: data.user.id,
-                    tokens: plannerToks,
-                    updated_at: new Date().toISOString(),
-                  },
-                  { onConflict: 'user_id' }
-                )
-                .catch(() => {});
+                .update({
+                  access_token: cleanToken,
+                  platform_user_id: accId,
+                  updated_at: new Date().toISOString(),
+                })
+                .eq('id', existing.id);
+            } else {
+              await supabase.from('user_platform_tokens').insert({
+                user_id: uid,
+                platform: meta.id,
+                access_token: cleanToken,
+                platform_user_id: accId,
+                updated_at: new Date().toISOString(),
+              });
             }
           })
           .catch(() => {});
@@ -1111,6 +1137,20 @@ export default function App() {
     if (meta.id === 'threads') {
       localStorage.setItem(scopedKey('sa_threads_auto_optout'), '1');
     }
+    supabase.auth
+      .getUser()
+      .then(({ data }) => {
+        if (data?.user?.id) {
+          supabase
+            .from('user_platform_tokens')
+            .delete()
+            .eq('user_id', data.user.id)
+            .eq('platform', meta.id)
+            .then(() => {})
+            .catch(() => {});
+        }
+      })
+      .catch(() => {});
     setConnectionsMap({ ...cMap });
     if (connectPlatform === meta.id) {
       setHandleInput('');

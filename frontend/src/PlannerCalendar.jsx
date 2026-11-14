@@ -231,6 +231,148 @@ function buildScheduledIso(dateStr, timeStr) {
   return Number.isNaN(dt.getTime()) ? new Date().toISOString() : dt.toISOString();
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const META_PREFIX = 'SA_META:';
+
+function generateUuid() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
+function ensureUuid(id) {
+  return typeof id === 'string' && UUID_RE.test(id) ? id : generateUuid();
+}
+
+function deserializeDbRowToPost(row) {
+  let meta = {};
+  if (typeof row.error_message === 'string' && row.error_message.startsWith(META_PREFIX)) {
+    try {
+      meta = JSON.parse(row.error_message.slice(META_PREFIX.length)) || {};
+    } catch {
+      meta = {};
+    }
+  }
+
+  const schedIso = row.scheduled_at || new Date().toISOString();
+  const dt = new Date(schedIso);
+  const derivedDate = !Number.isNaN(dt.getTime()) ? toDateKey(dt) : toDateKey(new Date());
+  const derivedTime = !Number.isNaN(dt.getTime())
+    ? `${String(dt.getHours()).padStart(2, '0')}:${String(dt.getMinutes()).padStart(2, '0')}`
+    : '18:00';
+
+  const storagePaths = Array.isArray(row.storage_paths)
+    ? row.storage_paths
+    : Array.isArray(meta.storage_paths)
+    ? meta.storage_paths
+    : typeof row.media_path === 'string' && row.media_path.trim()
+    ? row.media_path.split('\n').filter(Boolean)
+    : [];
+
+  const mediaUrls = Array.isArray(row.media_urls)
+    ? row.media_urls
+    : Array.isArray(meta.media_urls)
+    ? meta.media_urls
+    : typeof row.media_url === 'string' && row.media_url.trim()
+    ? row.media_url.split('\n').filter(Boolean)
+    : [];
+
+  const platforms = Array.isArray(row.platforms)
+    ? row.platforms
+    : Array.isArray(meta.platforms) && meta.platforms.length > 0
+    ? meta.platforms
+    : typeof row.platform === 'string' && row.platform.trim()
+    ? row.platform.split(',').map((s) => s.trim()).filter(Boolean)
+    : ['instagram'];
+
+  const caption = row.caption || '';
+  return {
+    id: row.id,
+    user_id: row.user_id,
+    title:
+      row.title ||
+      meta.title ||
+      caption.trim().split('\n')[0]?.slice(0, 60) ||
+      'Scheduled Post',
+    caption,
+    captions: row.captions || meta.captions || {},
+    format: row.format || meta.format || (storagePaths.length > 1 ? 'carousel' : 'video'),
+    platforms,
+    media_urls: mediaUrls,
+    storage_paths: storagePaths,
+    scheduled_date: row.scheduled_date || meta.scheduled_date || derivedDate,
+    scheduled_time: row.scheduled_time || meta.scheduled_time || derivedTime,
+    scheduled_at: schedIso,
+    expires_at:
+      row.expires_at ||
+      meta.expires_at ||
+      new Date(new Date(schedIso).getTime() + 48 * 3600 * 1000).toISOString(),
+    status: meta.ui_status || row.status || 'scheduled',
+    first_comment: row.first_comment || meta.first_comment || '',
+    auto_dm_keyword: row.auto_dm_keyword || meta.auto_dm_keyword || '',
+    auto_dm_url: row.auto_dm_url || meta.auto_dm_url || '',
+    auto_cleanup:
+      typeof row.auto_cleanup === 'boolean'
+        ? row.auto_cleanup
+        : meta.auto_cleanup !== false,
+    media_cleaned_up: Boolean(row.media_cleaned_up ?? meta.media_cleaned_up),
+    dispatch_results: row.dispatch_results || meta.dispatch_results || [],
+    last_dispatched_at: row.last_dispatched_at || meta.last_dispatched_at || null,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+function serializePostToDbRow(record, userId, fallbackStatus) {
+  const schedIso =
+    record.scheduled_at || buildScheduledIso(record.scheduled_date, record.scheduled_time);
+  const paths = (record.storage_paths || []).filter(Boolean);
+  const urls = (record.media_urls || []).filter(Boolean);
+  const metaPayload = {
+    title: record.title || '',
+    captions: record.captions || {},
+    format: record.format || 'video',
+    platforms: record.platforms || ['instagram'],
+    storage_paths: paths,
+    media_urls: urls,
+    scheduled_date: record.scheduled_date || '',
+    scheduled_time: record.scheduled_time || '18:00',
+    expires_at:
+      record.expires_at ||
+      new Date(new Date(schedIso).getTime() + 48 * 3600 * 1000).toISOString(),
+    ui_status: record.status || 'scheduled',
+    first_comment: record.first_comment || '',
+    auto_dm_keyword: record.auto_dm_keyword || '',
+    auto_dm_url: record.auto_dm_url || '',
+    auto_cleanup: record.auto_cleanup !== false,
+    media_cleaned_up: Boolean(record.media_cleaned_up),
+    dispatch_results: record.dispatch_results || [],
+    last_dispatched_at: record.last_dispatched_at || null,
+  };
+  const rawStatus = fallbackStatus || record.status || 'scheduled';
+  const dbStatus = ['draft', 'scheduled', 'published', 'failed'].includes(rawStatus)
+    ? rawStatus
+    : 'scheduled';
+
+  return {
+    id: ensureUuid(record.id),
+    user_id: userId,
+    platform: (record.platforms && record.platforms[0]) || 'instagram',
+    caption: record.caption || '',
+    media_path: paths.length > 0 ? paths.join('\n') : null,
+    media_url: urls.length > 0 ? urls.join('\n') : null,
+    scheduled_at: schedIso,
+    status: dbStatus,
+    error_message: `${META_PREFIX}${JSON.stringify(metaPayload)}`,
+    updated_at: new Date().toISOString(),
+  };
+}
+
 function hydrateMediaItemsFromRow(row) {
   if (Array.isArray(row.media_items) && row.media_items.length > 0) {
     return row.media_items;
@@ -392,19 +534,20 @@ export default function PlannerCalendar({
       setSupabaseStatus('connected');
       if (Array.isArray(rows) && rows.length > 0) {
         const hydrated = await Promise.all(
-          rows.map(async (r) => {
-            let refreshedUrls = Array.isArray(r.media_urls) ? r.media_urls : [];
-            if (Array.isArray(r.storage_paths) && r.storage_paths.length > 0) {
+          rows.map(async (rawRow) => {
+            const parsedRow = deserializeDbRowToPost(rawRow);
+            let refreshedUrls = Array.isArray(parsedRow.media_urls) ? parsedRow.media_urls : [];
+            if (Array.isArray(parsedRow.storage_paths) && parsedRow.storage_paths.length > 0) {
               const { data: signedBatch } = await supabase.storage
                 .from(TEMP_BUCKET)
-                .createSignedUrls(r.storage_paths, 86400);
+                .createSignedUrls(parsedRow.storage_paths, 86400);
               if (Array.isArray(signedBatch) && signedBatch.some((s) => s?.signedUrl)) {
                 refreshedUrls = signedBatch.map(
                   (s, idx) => s?.signedUrl || refreshedUrls[idx] || ''
                 );
               }
             }
-            const nextRow = { ...r, media_urls: refreshedUrls };
+            const nextRow = { ...parsedRow, media_urls: refreshedUrls };
             return {
               ...nextRow,
               media_items: hydrateMediaItemsFromRow(nextRow),
@@ -415,15 +558,23 @@ export default function PlannerCalendar({
         localStorage.setItem(scopedKey('sa_scheduled_posts'), JSON.stringify(hydrated));
       }
 
-      const { data: tokRow } = await supabase
+      const { data: tokRows } = await supabase
         .from('user_platform_tokens')
-        .select('tokens')
-        .eq('user_id', user.id)
-        .maybeSingle();
+        .select('platform, access_token, platform_user_id')
+        .eq('user_id', user.id);
 
-      if (tokRow?.tokens && typeof tokRow.tokens === 'object') {
+      if (Array.isArray(tokRows) && tokRows.length > 0) {
+        const fromDb = {};
+        tokRows.forEach((tr) => {
+          if (tr?.platform && tr?.access_token) {
+            fromDb[tr.platform] = {
+              access_token: tr.access_token,
+              account_id: tr.platform_user_id || '',
+            };
+          }
+        });
         setPlatformTokens((prev) => {
-          const merged = { ...prev, ...tokRow.tokens };
+          const merged = { ...prev, ...fromDb };
           localStorage.setItem(scopedKey('sa_platform_tokens'), JSON.stringify(merged));
           return merged;
         });
@@ -487,39 +638,15 @@ export default function PlannerCalendar({
   const upsertPostInSupabase = async (record) => {
     if (!supabaseUser) return false;
     try {
-      const dbRow = {
-        id: record.id,
-        user_id: supabaseUser.id,
-        title: record.title || '',
-        caption: record.caption || '',
-        captions: record.captions || {},
-        format: record.format || 'video',
-        platforms: record.platforms || ['instagram'],
-        media_urls: record.media_urls || [],
-        storage_paths: record.storage_paths || [],
-        scheduled_date: record.scheduled_date || todayKey,
-        scheduled_time: record.scheduled_time || '18:00',
-        scheduled_at:
-          record.scheduled_at || buildScheduledIso(record.scheduled_date, record.scheduled_time),
-        expires_at:
-          record.expires_at ||
-          new Date(
-            new Date(
-              record.scheduled_at || buildScheduledIso(record.scheduled_date, record.scheduled_time)
-            ).getTime() +
-              48 * 3600 * 1000
-          ).toISOString(),
-        status: record.status || 'scheduled',
-        first_comment: record.first_comment || '',
-        auto_dm_keyword: record.auto_dm_keyword || '',
-        auto_dm_url: record.auto_dm_url || '',
-        auto_cleanup: record.auto_cleanup !== false,
-        media_cleaned_up: Boolean(record.media_cleaned_up),
-        dispatch_results: record.dispatch_results || [],
-        last_dispatched_at: record.last_dispatched_at || null,
-        updated_at: new Date().toISOString(),
-      };
-      const { error } = await supabase.from('scheduled_posts').upsert(dbRow, { onConflict: 'id' });
+      const dbRow = serializePostToDbRow(record, supabaseUser.id);
+      let { error } = await supabase.from('scheduled_posts').upsert(dbRow, { onConflict: 'id' });
+      if (error && error.code === '23514' && dbRow.status !== 'scheduled') {
+        const retryRow = serializePostToDbRow(record, supabaseUser.id, 'scheduled');
+        const retryRes = await supabase
+          .from('scheduled_posts')
+          .upsert(retryRow, { onConflict: 'id' });
+        error = retryRes.error;
+      }
       if (!error) {
         setSupabaseStatus('connected');
         return true;
@@ -785,7 +912,7 @@ export default function PlannerCalendar({
   };
 
   const buildPostRecord = (statusOverride) => {
-    const id = editingId || `post-${Date.now()}`;
+    const id = ensureUuid(editingId);
     const derivedTitle =
       title.trim() ||
       masterCaption.trim().split('\n')[0]?.slice(0, 60) ||
@@ -1047,7 +1174,7 @@ export default function PlannerCalendar({
     }
     const next = posts.filter((p) => p.id !== postId);
     persistPostsLocal(next);
-    if (supabaseUser) {
+    if (supabaseUser && UUID_RE.test(postId)) {
       supabase.from('scheduled_posts').delete().eq('id', postId).then(() => {});
     }
     fetch(`/api/planner/posts/${encodeURIComponent(postId)}`, { method: 'DELETE' }).catch(() => {});
