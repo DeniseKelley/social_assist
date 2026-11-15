@@ -285,6 +285,121 @@ export default function App() {
     return tMap;
   };
 
+  const parseUsernameFromTokenScope = (scopeVal) => {
+    if (!scopeVal || typeof scopeVal !== 'string') return '';
+    const trimmed = scopeVal.trim();
+    if (!trimmed) return '';
+    if (trimmed.startsWith('{')) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        return (parsed?.ig_username || parsed?.username || '').replace(/^@/, '').trim();
+      } catch {
+        return '';
+      }
+    }
+    if (trimmed.toLowerCase().startsWith('username:')) {
+      return trimmed.slice('username:'.length).replace(/^@/, '').trim();
+    }
+    return '';
+  };
+
+  const verifyInstagramUnifiedToken = async (accessToken) => {
+    const cleanTok = (accessToken || '').trim();
+    if (!cleanTok) return null;
+    try {
+      const resp = await fetch(
+        `https://graph.facebook.com/v27.0/me/assigned_instagram_accounts?fields=id,username&access_token=${encodeURIComponent(
+          cleanTok
+        )}`
+      );
+      if (!resp.ok) {
+        const errJson = await resp.json().catch(() => ({}));
+        return {
+          ok: false,
+          error: errJson?.error?.message || `HTTP ${resp.status}`,
+        };
+      }
+      const json = await resp.json();
+      const first = (json?.data || []).find((item) => item && item.id);
+      if (first) {
+        return {
+          ok: true,
+          igUserId: String(first.id),
+          igUsername: String(first.username || '').replace(/^@/, '').trim(),
+        };
+      }
+      return {
+        ok: false,
+        error: 'No assigned Instagram accounts returned by /v27.0/me/assigned_instagram_accounts.',
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        error: err?.message || 'Network error verifying assigned_instagram_accounts.',
+      };
+    }
+  };
+
+  const upsertPlatformTokenToSupabase = async ({
+    platform,
+    accessToken,
+    platformUserId = '',
+    username = '',
+    metaAppId = '',
+  }) => {
+    try {
+      const { data: authData } = await supabase.auth.getUser();
+      const uid = authData?.user?.id;
+      if (!uid || !platform || !accessToken) return { saved: false };
+
+      const cleanUser = (username || '').replace(/^@/, '').trim();
+      const cleanAccId = (platformUserId || '').trim();
+      const scopePayload =
+        platform === 'instagram'
+          ? JSON.stringify({
+              ig_username: cleanUser,
+              ig_user_id: cleanAccId,
+              ...(metaAppId ? { meta_app_id: metaAppId.trim() } : {}),
+            })
+          : cleanUser
+          ? `username:${cleanUser}`
+          : null;
+      const tokenType = /^EAA/i.test(accessToken) ? 'meta_unified' : 'bearer';
+
+      const { data: existing } = await supabase
+        .from('user_platform_tokens')
+        .select('id')
+        .eq('user_id', uid)
+        .eq('platform', platform)
+        .maybeSingle();
+
+      const rowValues = {
+        access_token: accessToken,
+        platform_user_id: cleanAccId || null,
+        token_type: tokenType,
+        scope: scopePayload,
+        updated_at: new Date().toISOString(),
+      };
+
+      if (existing?.id) {
+        const { error } = await supabase
+          .from('user_platform_tokens')
+          .update(rowValues)
+          .eq('id', existing.id);
+        return { saved: !error, error };
+      } else {
+        const { error } = await supabase.from('user_platform_tokens').insert({
+          user_id: uid,
+          platform,
+          ...rowValues,
+        });
+        return { saved: !error, error };
+      }
+    } catch (err) {
+      return { saved: false, error: err };
+    }
+  };
+
   const fetchPlatformAnalytics = async ({
     platformId,
     overrideHandle = '',
@@ -364,12 +479,99 @@ export default function App() {
     localStorage.removeItem('sa_connection');
     localStorage.removeItem('sa_ig_access_token');
 
-    const cMap = loadSavedConnectionsMap(emailOverride);
+    let cMap = loadSavedConnectionsMap(emailOverride);
     const rawFlows = localStorage.getItem(scopedKey('sa_automations', emailOverride));
     const savedFlows = JSON.parse(rawFlows || 'null') || INITIAL_AUTOMATIONS;
     const savedLogs = JSON.parse(
       localStorage.getItem(scopedKey('sa_logs', emailOverride)) || '[]'
     );
+
+    // Hydrate saved tokens + IG_USER_ID + IG_USERNAME from Supabase `user_platform_tokens` so Planner publishing stays unlocked!
+    try {
+      const { data: uRes } = await supabase.auth.getUser();
+      const uid = uRes?.user?.id;
+      if (uid) {
+        const { data: tokRows } = await supabase
+          .from('user_platform_tokens')
+          .select('id, platform, platform_user_id, access_token, scope, token_type')
+          .eq('user_id', uid);
+
+        if (Array.isArray(tokRows) && tokRows.length > 0) {
+          const tMap = loadSavedTokensMap(emailOverride);
+          let plannerToks = {};
+          try {
+            plannerToks =
+              JSON.parse(localStorage.getItem(scopedKey('sa_platform_tokens', emailOverride)) || '{}') ||
+              {};
+          } catch {
+            plannerToks = {};
+          }
+
+          for (const tr of tokRows) {
+            if (!tr?.platform || !tr?.access_token) continue;
+            let resolvedHandle =
+              parseUsernameFromTokenScope(tr.scope) || cMap[tr.platform]?.handle || '';
+            let resolvedAccId = tr.platform_user_id || cMap[tr.platform]?.account_id || '';
+
+            if (tr.platform === 'instagram' && (!resolvedHandle || !resolvedAccId)) {
+              const verified = await verifyInstagramUnifiedToken(tr.access_token);
+              if (verified?.ok) {
+                resolvedAccId = resolvedAccId || verified.igUserId;
+                resolvedHandle = resolvedHandle || verified.igUsername;
+                await upsertPlatformTokenToSupabase({
+                  platform: 'instagram',
+                  accessToken: tr.access_token,
+                  platformUserId: resolvedAccId,
+                  username: resolvedHandle,
+                });
+              }
+            }
+
+            tMap[tr.platform] = tr.access_token;
+            if (tr.platform === 'instagram') {
+              localStorage.setItem(scopedKey('sa_ig_access_token', emailOverride), tr.access_token);
+            }
+            plannerToks[tr.platform] = {
+              ...(plannerToks[tr.platform] || {}),
+              access_token: tr.access_token,
+              account_id: resolvedAccId,
+              username: resolvedHandle,
+            };
+            if (resolvedHandle) {
+              cMap = {
+                ...cMap,
+                [tr.platform]: {
+                  ...(cMap[tr.platform] || {}),
+                  handle: resolvedHandle,
+                  has_access_token: true,
+                  account_id: resolvedAccId,
+                  connected_at: cMap[tr.platform]?.connected_at || new Date().toISOString(),
+                },
+              };
+            }
+          }
+
+          localStorage.setItem(scopedKey('sa_tokens_map', emailOverride), JSON.stringify(tMap));
+          localStorage.setItem(
+            scopedKey('sa_platform_tokens', emailOverride),
+            JSON.stringify(plannerToks)
+          );
+          localStorage.setItem(scopedKey('sa_connections_map', emailOverride), JSON.stringify(cMap));
+          if (cMap.instagram?.handle) {
+            localStorage.setItem(
+              scopedKey('sa_connection', emailOverride),
+              JSON.stringify({
+                instagram_handle: cMap.instagram.handle,
+                has_access_token: Boolean(cMap.instagram.has_access_token),
+                account_id: cMap.instagram.account_id || '',
+              })
+            );
+          }
+        }
+      }
+    } catch {
+      // Safe fallback to local cache if offline
+    }
 
     setConnectionsMap(cMap);
     setAutomations(savedFlows);
@@ -705,38 +907,13 @@ export default function App() {
             JSON.stringify(plannerToks)
           );
 
-          // Sync token to RLS-isolated Supabase `user_platform_tokens` row so 24/7 scheduled posts auto-publish!
-          supabase.auth
-            .getUser()
-            .then(async ({ data }) => {
-              const uid = data?.user?.id;
-              if (!uid) return;
-              const { data: existing } = await supabase
-                .from('user_platform_tokens')
-                .select('id')
-                .eq('user_id', uid)
-                .eq('platform', meta.id)
-                .maybeSingle();
-              if (existing?.id) {
-                await supabase
-                  .from('user_platform_tokens')
-                  .update({
-                    access_token: cleanTok,
-                    platform_user_id: cleanAccId || null,
-                    updated_at: new Date().toISOString(),
-                  })
-                  .eq('id', existing.id);
-              } else {
-                await supabase.from('user_platform_tokens').insert({
-                  user_id: uid,
-                  platform: meta.id,
-                  access_token: cleanTok,
-                  platform_user_id: cleanAccId || null,
-                  updated_at: new Date().toISOString(),
-                });
-              }
-            })
-            .catch(() => {});
+          // Sync token + IG_USER_ID + IG_USERNAME to RLS-isolated Supabase `user_platform_tokens`
+          upsertPlatformTokenToSupabase({
+            platform: meta.id,
+            accessToken: cleanTok,
+            platformUserId: cleanAccId,
+            username: cleanHandle,
+          }).catch(() => {});
         }
 
         let nextConns = {
@@ -954,19 +1131,48 @@ export default function App() {
 
       if (tokenInput && tokenInput.trim()) {
         const cleanToken = tokenInput.trim();
-        const verifyResp = await fetch(
-          `/api/analytics?platform=${encodeURIComponent(meta.id)}&handle=${encodeURIComponent(cleanHandle || 'me')}&refresh=true&strict_token=true`,
-          {
-            headers: { Authorization: `Bearer ${cleanToken}` },
-            cache: 'no-store',
+        let verifiedAccId = '';
+        let verifiedUsername = '';
+        let liveAna = null;
+
+        if (meta.id === 'instagram') {
+          // Verify Unified Login system-user token directly via v27.0/me/assigned_instagram_accounts
+          const unifiedCheck = await verifyInstagramUnifiedToken(cleanToken);
+          if (unifiedCheck?.ok) {
+            verifiedAccId = unifiedCheck.igUserId;
+            verifiedUsername = unifiedCheck.igUsername;
+          } else if (/^EAA/i.test(cleanToken)) {
+            throw new Error(
+              `Instagram Unified Login verification failed: ${
+                unifiedCheck?.error || 'Check assigned_instagram_accounts permissions.'
+              }`
+            );
           }
-        );
-        if (!verifyResp.ok) {
-          const errJson = await verifyResp.json().catch(() => ({}));
-          throw new Error(errJson.error || `Invalid ${meta.name} API token`);
         }
-        const liveAna = await verifyResp.json();
-        const finalHandle = liveAna.profile?.username || cleanHandle;
+
+        // Fetch live analytics telemetry (strict if token wasn't already verified via assigned_instagram_accounts)
+        try {
+          const verifyResp = await fetch(
+            `/api/analytics?platform=${encodeURIComponent(meta.id)}&handle=${encodeURIComponent(
+              verifiedUsername || cleanHandle || 'me'
+            )}&refresh=true${verifiedAccId ? '' : '&strict_token=true'}`,
+            {
+              headers: { Authorization: `Bearer ${cleanToken}` },
+              cache: 'no-store',
+            }
+          );
+          if (verifyResp.ok) {
+            liveAna = await verifyResp.json();
+          } else if (!verifiedAccId) {
+            const errJson = await verifyResp.json().catch(() => ({}));
+            throw new Error(errJson.error || `Invalid ${meta.name} API token`);
+          }
+        } catch (anaErr) {
+          if (!verifiedAccId) throw anaErr;
+        }
+
+        const finalHandle = verifiedUsername || liveAna?.profile?.username || cleanHandle;
+        const finalAccountId = verifiedAccId || liveAna?.profile?.account_id || '';
 
         const nextTokens = { ...tMap, [meta.id]: cleanToken };
         localStorage.setItem(scopedKey('sa_tokens_map'), JSON.stringify(nextTokens));
@@ -974,7 +1180,7 @@ export default function App() {
           localStorage.setItem(scopedKey('sa_ig_access_token'), cleanToken);
         }
 
-        // Also mirror into Planner & Supabase `user_platform_tokens` for 24/7 auto-publishing
+        // Mirror into Planner & persist IG_USER_ID + IG_USERNAME + IG_ACCESS_TOKEN in Supabase `user_platform_tokens`
         let plannerToks = {};
         try {
           plannerToks =
@@ -985,48 +1191,25 @@ export default function App() {
         plannerToks[meta.id] = {
           ...(plannerToks[meta.id] || {}),
           access_token: cleanToken,
-          account_id: liveAna.profile?.account_id || '',
+          account_id: finalAccountId,
+          username: finalHandle,
         };
         localStorage.setItem(scopedKey('sa_platform_tokens'), JSON.stringify(plannerToks));
-        supabase.auth
-          .getUser()
-          .then(async ({ data }) => {
-            const uid = data?.user?.id;
-            if (!uid) return;
-            const accId = liveAna.profile?.account_id || null;
-            const { data: existing } = await supabase
-              .from('user_platform_tokens')
-              .select('id')
-              .eq('user_id', uid)
-              .eq('platform', meta.id)
-              .maybeSingle();
-            if (existing?.id) {
-              await supabase
-                .from('user_platform_tokens')
-                .update({
-                  access_token: cleanToken,
-                  platform_user_id: accId,
-                  updated_at: new Date().toISOString(),
-                })
-                .eq('id', existing.id);
-            } else {
-              await supabase.from('user_platform_tokens').insert({
-                user_id: uid,
-                platform: meta.id,
-                access_token: cleanToken,
-                platform_user_id: accId,
-                updated_at: new Date().toISOString(),
-              });
-            }
-          })
-          .catch(() => {});
+
+        await upsertPlatformTokenToSupabase({
+          platform: meta.id,
+          accessToken: cleanToken,
+          platformUserId: finalAccountId,
+          username: finalHandle,
+          metaAppId: appIdInput,
+        });
 
         let nextConns = {
           ...cMap,
           [meta.id]: {
             handle: finalHandle,
             has_access_token: true,
-            account_id: liveAna.profile?.account_id || '',
+            account_id: finalAccountId,
             connected_at: new Date().toISOString(),
           },
         };
@@ -1037,7 +1220,7 @@ export default function App() {
             JSON.stringify({
               instagram_handle: finalHandle,
               has_access_token: true,
-              account_id: liveAna.profile?.account_id || '',
+              account_id: finalAccountId,
             })
           );
           const autoThreads = await tryAutoLinkThreadsForInstagramHandle(finalHandle, nextConns);
@@ -1046,20 +1229,26 @@ export default function App() {
 
         setConnectionsMap(nextConns);
         setHandleInput(meta.buildProfileUrl(finalHandle));
-        setAnalyticsByPlatform((prev) => {
-          const next = { ...prev, [meta.id]: liveAna };
-          const snap = getActiveAnalyticsSnapshot(next, nextConns, meta.id);
-          setOpenclawOutput(runLocalOpenClawAnalysis(openclawPrompt, snap));
-          return next;
-        });
+        if (liveAna) {
+          setAnalyticsByPlatform((prev) => {
+            const next = { ...prev, [meta.id]: liveAna };
+            const snap = getActiveAnalyticsSnapshot(next, nextConns, meta.id);
+            setOpenclawOutput(runLocalOpenClawAnalysis(openclawPrompt, snap));
+            return next;
+          });
+        }
         setSelectedPlatform(meta.id);
         setConnectStatusMsg({
           type: 'success',
-          text: `Connected @${finalHandle} on ${meta.name} via Official API (live metrics synced)!`,
+          text: `Connected @${finalHandle}${
+            finalAccountId ? ` (ID: ${finalAccountId})` : ''
+          } — saved to user_platform_tokens & unlocked Planner publishing!`,
         });
-        showToast(`Connected @${finalHandle} on ${meta.name}!`);
+        showToast(
+          `Connected @${finalHandle} — saved to Supabase & unlocked Planner publishing!`
+        );
         setTokenInput('');
-        setActiveTab('analytics');
+        setActiveTab('planner');
         triggerFairyWand();
       } else {
         // Verify & pull live stats FIRST before persisting handle to workspace storage
@@ -4448,15 +4637,34 @@ export default function App() {
                 )}
               </form>
 
-              {/* Optional Collapsed Advanced Section (Hidden by Default) */}
-              <details className="pt-2 border-t border-neutral-200 text-xs">
-                <summary className="cursor-pointer font-bold text-neutral-500 hover:text-[#19154E] select-none py-1">
-                  ⚙️ App Owner 1-Click OAuth &amp; Advanced Token Setup (Optional)
+              {/* Unified Login / API Token Section (Auto-open for Instagram so pasting token is 1 click) */}
+              <details open={connectMeta.id === 'instagram'} className="pt-2 border-t border-neutral-200 text-xs">
+                <summary className="cursor-pointer font-bold text-neutral-600 hover:text-[#19154E] select-none py-1">
+                  ⚙️ {connectMeta.id === 'instagram'
+                    ? 'Instagram Unified Login Token (v27.0 /me/assigned_instagram_accounts)'
+                    : 'App Owner 1-Click OAuth & Advanced Token Setup (Optional)'}
                 </summary>
                 <form
                   onSubmit={handleConnectSubmit}
                   className="mt-4 space-y-4 p-4 rounded-2xl bg-[#F5EEFF] border-2 border-[#19154E]"
                 >
+                  {connectionsMap[connectMeta.id]?.has_access_token && (
+                    <div className="p-3 rounded-xl bg-[#C8F904]/40 border-2 border-[#19154E] flex flex-wrap items-center justify-between gap-2">
+                      <div className="text-xs font-bold text-[#19154E]">
+                        🟢 Publishing Unlocked: @{connectionsMap[connectMeta.id].handle}
+                        {connectionsMap[connectMeta.id].account_id
+                          ? ` (ID: ${connectionsMap[connectMeta.id].account_id})`
+                          : ''}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setActiveTab('planner')}
+                        className="px-3 py-1 rounded-lg bg-[#19154E] text-white font-bold text-[11px]"
+                      >
+                        Open Planner →
+                      </button>
+                    </div>
+                  )}
                   <div className="p-3 rounded-xl bg-white border border-[#19154E] space-y-1.5">
                     <div className="font-bold text-[#19154E]">
                       ⚡ 1-Click OAuth Redirect URI (Add once in Meta / TikTok / Google / X Developer App):
@@ -4502,7 +4710,11 @@ export default function App() {
                       type="password"
                       value={tokenInput}
                       onChange={(e) => setTokenInput(e.target.value)}
-                      placeholder={connectMeta.tokenPlaceholder}
+                      placeholder={
+                        connectMeta.id === 'instagram'
+                          ? 'Paste EAA... Unified Login token (verifies via v27.0/me/assigned_instagram_accounts)'
+                          : connectMeta.tokenPlaceholder
+                      }
                       className="w-full px-3.5 py-2 rounded-xl bg-white border-2 border-[#19154E] text-xs font-mono-code"
                     />
                   </div>
@@ -4516,7 +4728,7 @@ export default function App() {
                           type="text"
                           value={appIdInput}
                           onChange={(e) => setAppIdInput(e.target.value)}
-                          placeholder="App ID"
+                          placeholder="2152485965366776"
                           className="w-full px-3 py-2 rounded-xl bg-white border-2 border-[#19154E] text-xs font-mono-code"
                         />
                       </div>
@@ -4528,7 +4740,7 @@ export default function App() {
                           type="password"
                           value={appSecretInput}
                           onChange={(e) => setAppSecretInput(e.target.value)}
-                          placeholder="App Secret"
+                          placeholder="Leave blank when pasting token directly"
                           className="w-full px-3 py-2 rounded-xl bg-white border-2 border-[#19154E] text-xs font-mono-code"
                         />
                       </div>
@@ -4536,9 +4748,12 @@ export default function App() {
                   )}
                   <button
                     type="submit"
-                    className="editorial-btn px-4 py-2 rounded-xl bg-[#19154E] text-white text-xs font-bold"
+                    disabled={syncing}
+                    className="editorial-btn px-4 py-2 rounded-xl bg-[#19154E] text-white text-xs font-bold disabled:opacity-60"
                   >
-                    Save {connectMeta.name} API Token
+                    {syncing
+                      ? `Verifying & Saving ${connectMeta.name} Token...`
+                      : `Verify & Save ${connectMeta.name} Token (Unlock Planner)`}
                   </button>
                 </form>
               </details>

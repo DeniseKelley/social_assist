@@ -470,7 +470,12 @@ export default function PlannerCalendar({
   const [platformTokens, setPlatformTokens] = useState({});
 
   const connectedPlatformIds = PLATFORMS.map((p) => p.id).filter((id) =>
-    Boolean(connectionsMap?.[id]?.handle)
+    Boolean(
+      connectionsMap?.[id]?.handle ||
+        platformTokens?.[id]?.access_token ||
+        (sharedTokensMap?.[id] && sharedTokensMap[id].trim()) ||
+        (id === 'instagram' && igAccessToken && igAccessToken.trim())
+    )
   );
 
   // Supabase Temporary Cloud Storage & Queue state
@@ -560,19 +565,54 @@ export default function PlannerCalendar({
 
       const { data: tokRows } = await supabase
         .from('user_platform_tokens')
-        .select('platform, access_token, platform_user_id')
+        .select('platform, access_token, platform_user_id, scope, token_type')
         .eq('user_id', user.id);
 
       if (Array.isArray(tokRows) && tokRows.length > 0) {
         const fromDb = {};
-        tokRows.forEach((tr) => {
+        for (const tr of tokRows) {
           if (tr?.platform && tr?.access_token) {
+            let parsedUsername = '';
+            const rawScope = typeof tr.scope === 'string' ? tr.scope.trim() : '';
+            if (rawScope.startsWith('{')) {
+              try {
+                const scObj = JSON.parse(rawScope);
+                parsedUsername = (scObj?.ig_username || scObj?.username || '').replace(/^@/, '').trim();
+              } catch {
+                parsedUsername = '';
+              }
+            } else if (rawScope.toLowerCase().startsWith('username:')) {
+              parsedUsername = rawScope.slice('username:'.length).replace(/^@/, '').trim();
+            }
+
+            let resolvedAccId = tr.platform_user_id || '';
+            if (tr.platform === 'instagram' && (!resolvedAccId || !parsedUsername) && /^EAA/i.test(tr.access_token)) {
+              try {
+                const ar = await fetch(
+                  `https://graph.facebook.com/v27.0/me/assigned_instagram_accounts?fields=id,username&access_token=${encodeURIComponent(
+                    tr.access_token
+                  )}`
+                );
+                if (ar.ok) {
+                  const aj = await ar.json();
+                  const first = (aj?.data || []).find((x) => x && x.id);
+                  if (first) {
+                    resolvedAccId = resolvedAccId || String(first.id);
+                    parsedUsername = parsedUsername || String(first.username || '');
+                  }
+                }
+              } catch {
+                // ignore offline check
+              }
+            }
+
             fromDb[tr.platform] = {
               access_token: tr.access_token,
-              account_id: tr.platform_user_id || '',
+              account_id: resolvedAccId,
+              username: parsedUsername,
             };
           }
-        });
+        }
         setPlatformTokens((prev) => {
           const merged = { ...prev, ...fromDb };
           localStorage.setItem(scopedKey('sa_platform_tokens'), JSON.stringify(merged));
@@ -1132,11 +1172,17 @@ export default function PlannerCalendar({
       triggerFairyWand?.();
 
       const prefix = isAutoScheduled ? '⏰ Scheduled Auto-Post: ' : '';
+      const firstLiveErr = results.find((r) => r.mode === 'live_error');
       if (liveCount > 0) {
         showToast(
           `${prefix}Published live to ${liveCount} platform(s)${
             cleanedUp ? ' & purged temp Supabase media!' : '!'
           }`
+        );
+      } else if (firstLiveErr) {
+        showToast(
+          `${prefix}${firstLiveErr.platform.toUpperCase()} publish error: ${firstLiveErr.message}`,
+          'error'
         );
       } else {
         showToast(
@@ -1857,7 +1903,10 @@ export default function PlannerCalendar({
                       const isSelected = selectedPlatforms.includes(plat.id);
                       const liveReady = isPlatformLiveReady(plat.id);
                       const conn = connectionsMap?.[plat.id];
-                      const handle = conn?.handle;
+                      const handle =
+                        conn?.handle ||
+                        platformTokens?.[plat.id]?.username ||
+                        (plat.id === 'instagram' ? igHandle : '');
                       return (
                         <div
                           key={plat.id}

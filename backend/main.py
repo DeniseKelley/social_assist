@@ -94,30 +94,63 @@ async def verify_and_fetch_graph_profile(access_token: str) -> Dict[str, Any]:
     and profile details from an explicit Instagram/Facebook Graph API access token.
     """
     async with httpx.AsyncClient(timeout=15.0) as client:
-        ig_url = "https://graph.instagram.com/v21.0/me"
-        ig_params = {
-            "fields": "id,user_id,username,name,account_type,profile_picture_url,followers_count,follows_count,media_count,biography",
-            "access_token": access_token,
-        }
-        resp = await client.get(ig_url, params=ig_params)
-        if resp.status_code == 200:
-            data = resp.json()
-            if "id" in data or "username" in data:
+        if not access_token.upper().startswith("EAA"):
+            ig_url = "https://graph.instagram.com/v21.0/me"
+            ig_params = {
+                "fields": "id,user_id,username,name,account_type,profile_picture_url,followers_count,follows_count,media_count,biography",
+                "access_token": access_token,
+            }
+            resp = await client.get(ig_url, params=ig_params)
+            if resp.status_code == 200:
+                data = resp.json()
+                if "id" in data or "username" in data:
+                    return {
+                        "account_id": data.get("user_id") or data.get("id"),
+                        "graph_node_id": data.get("id"),
+                        "username": data.get("username", ""),
+                        "name": data.get("name") or data.get("username", ""),
+                        "account_type": data.get("account_type", "CREATOR"),
+                        "profile_picture_url": data.get("profile_picture_url", ""),
+                        "followers_count": data.get("followers_count", 0),
+                        "follows_count": data.get("follows_count", 0),
+                        "media_count": data.get("media_count", 0),
+                        "biography": data.get("biography", ""),
+                        "api_base": "https://graph.instagram.com/v21.0",
+                    }
+
+        # Meta Unified Login (`v27.0/me/assigned_instagram_accounts`)
+        assigned_resp = await client.get(
+            "https://graph.facebook.com/v27.0/me/assigned_instagram_accounts",
+            params={"fields": "id,username", "access_token": access_token},
+        )
+        if assigned_resp.status_code == 200:
+            assigned_list = assigned_resp.json().get("data", [])
+            if assigned_list and assigned_list[0].get("id"):
+                ig_id = assigned_list[0]["id"]
+                ig_uname = assigned_list[0].get("username", "")
+                node_resp = await client.get(
+                    f"https://graph.facebook.com/v27.0/{ig_id}",
+                    params={
+                        "fields": "id,username,name,profile_picture_url,followers_count,follows_count,media_count,biography",
+                        "access_token": access_token,
+                    },
+                )
+                nd = node_resp.json() if node_resp.status_code == 200 else {}
                 return {
-                    "account_id": data.get("user_id") or data.get("id"),
-                    "graph_node_id": data.get("id"),
-                    "username": data.get("username", ""),
-                    "name": data.get("name") or data.get("username", ""),
-                    "account_type": data.get("account_type", "CREATOR"),
-                    "profile_picture_url": data.get("profile_picture_url", ""),
-                    "followers_count": data.get("followers_count", 0),
-                    "follows_count": data.get("follows_count", 0),
-                    "media_count": data.get("media_count", 0),
-                    "biography": data.get("biography", ""),
-                    "api_base": "https://graph.instagram.com/v21.0",
+                    "account_id": ig_id,
+                    "graph_node_id": ig_id,
+                    "username": nd.get("username") or ig_uname,
+                    "name": nd.get("name") or nd.get("username") or ig_uname,
+                    "account_type": "BUSINESS",
+                    "profile_picture_url": nd.get("profile_picture_url", ""),
+                    "followers_count": nd.get("followers_count", 0),
+                    "follows_count": nd.get("follows_count", 0),
+                    "media_count": nd.get("media_count", 0),
+                    "biography": nd.get("biography", ""),
+                    "api_base": "https://graph.facebook.com/v27.0",
                 }
 
-        fb_url = "https://graph.facebook.com/v21.0/me/accounts"
+        fb_url = "https://graph.facebook.com/v27.0/me/accounts"
         fb_params = {
             "fields": "name,access_token,instagram_business_account{id,username,name,profile_picture_url,followers_count,follows_count,media_count,biography}",
             "access_token": access_token,
@@ -139,10 +172,10 @@ async def verify_and_fetch_graph_profile(access_token: str) -> Dict[str, Any]:
                         "follows_count": ig_biz.get("follows_count", 0),
                         "media_count": ig_biz.get("media_count", 0),
                         "biography": ig_biz.get("biography", ""),
-                        "api_base": "https://graph.facebook.com/v21.0",
+                        "api_base": "https://graph.facebook.com/v27.0",
                     }
 
-        raise ValueError(f"Could not verify Instagram token: {resp.text}")
+        raise ValueError(f"Could not verify Instagram token: {assigned_resp.text}")
 
 
 def _extract_embed_context_json(html: str) -> Optional[Dict[str, Any]]:
@@ -1630,12 +1663,23 @@ async def _dispatch_single_platform(
                     "status": "queued",
                     "message": "Instagram token verified — add a public https:// media URL for Graph container pull.",
                 }
-            api_base = "https://graph.instagram.com/v21.0"
+            is_unified = token.upper().startswith("EAA")
+            api_base = "https://graph.facebook.com/v27.0" if is_unified else "https://graph.instagram.com/v21.0"
             if not account_id:
-                me_r = await client.get(f"{api_base}/me", params={"fields": "id,user_id", "access_token": token})
-                if me_r.status_code == 200:
-                    me_d = me_r.json()
-                    account_id = me_d.get("user_id") or me_d.get("id") or ""
+                if is_unified:
+                    ar = await client.get(
+                        f"{api_base}/me/assigned_instagram_accounts",
+                        params={"fields": "id,username", "access_token": token},
+                    )
+                    if ar.status_code == 200:
+                        ad = ar.json().get("data", [])
+                        if ad and ad[0].get("id"):
+                            account_id = ad[0]["id"]
+                else:
+                    me_r = await client.get(f"{api_base}/me", params={"fields": "id,user_id", "access_token": token})
+                    if me_r.status_code == 200:
+                        me_d = me_r.json()
+                        account_id = me_d.get("user_id") or me_d.get("id") or ""
             if not account_id:
                 return {
                     "platform": "instagram",
