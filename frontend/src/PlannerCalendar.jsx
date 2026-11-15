@@ -507,6 +507,8 @@ export default function PlannerCalendar({
   const [dmTargetUrl, setDmTargetUrl] = useState('https://techfairylab.com');
 
   const [publishing, setPublishing] = useState(false);
+  const [publishStageText, setPublishStageText] = useState('');
+  const [uploadErrorMsg, setUploadErrorMsg] = useState('');
   const [draggedPostId, setDraggedPostId] = useState(null);
   const [copiedId, setCopiedId] = useState(null);
   const fileInputRef = useRef(null);
@@ -728,8 +730,13 @@ export default function PlannerCalendar({
   const openComposerForSlot = (dateKey, defaultTime) => {
     const dt = new Date(`${dateKey}T12:00:00`);
     const peak = PEAK_WINDOWS_BY_DOW[dt.getDay()]?.time || '18:00';
+    const liveReadyIds = PLATFORMS.map((p) => p.id).filter((id) => isPlatformLiveReady(id));
     const defaultPlats =
-      connectedPlatformIds.length > 0 ? connectedPlatformIds : ['instagram', 'tiktok', 'youtube'];
+      liveReadyIds.length > 0
+        ? liveReadyIds
+        : connectedPlatformIds.length > 0
+        ? connectedPlatformIds
+        : ['instagram'];
     setEditingId(null);
     setFormat('video');
     setSelectedPlatforms(defaultPlats);
@@ -743,6 +750,8 @@ export default function PlannerCalendar({
     setAutoCleanup(true);
     setMediaItems([]);
     setRemoteUrlInput('');
+    setUploadErrorMsg('');
+    setPublishStageText('');
     setPreviewPlatform(defaultPlats[0] || 'instagram');
     setPreviewSlideIdx(0);
     setAttachDmTrigger(false);
@@ -790,13 +799,24 @@ export default function PlannerCalendar({
     const files = Array.from(fileList || []);
     if (files.length === 0) return;
 
+    setUploadErrorMsg('');
     const oversized = files.find((f) => f.size > MAX_TEMP_FILE_BYTES);
     if (oversized) {
-      showToast(
-        `"${oversized.name}" exceeds Supabase Free Tier's 50 MB file limit — compress slightly or paste a hosted link.`,
-        'error'
-      );
+      const msg = `"${oversized.name}" exceeds Supabase Free Tier's 50 MB file limit — compress slightly or paste a hosted link.`;
+      setUploadErrorMsg(msg);
+      showToast(msg, 'error');
       return;
+    }
+
+    let activeUser = supabaseUser;
+    if (!activeUser) {
+      try {
+        const { data: uRes } = await supabase.auth.getUser();
+        activeUser = uRes?.user || null;
+        if (activeUser) setSupabaseUser(activeUser);
+      } catch {
+        activeUser = null;
+      }
     }
 
     const batchTs = Date.now();
@@ -809,7 +829,7 @@ export default function PlannerCalendar({
         name: file.name,
         isRemote: false,
         storagePath: '',
-        uploading: Boolean(supabaseUser),
+        uploading: Boolean(activeUser),
         _rawFile: file,
       };
     });
@@ -826,14 +846,20 @@ export default function PlannerCalendar({
       return combined;
     });
 
-    if (!supabaseUser) return;
+    if (!activeUser) {
+      const msg =
+        'Sign in to SocialAssist so your video can be stored temporarily in your private Supabase scheduled-media bucket.';
+      setUploadErrorMsg(msg);
+      showToast(msg, 'error');
+      return;
+    }
 
     setUploadingCount((c) => c + initialSlides.length);
     for (let i = 0; i < initialSlides.length; i++) {
       const slide = initialSlides[i];
       const file = slide._rawFile;
       const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_').slice(-60);
-      const storagePath = `${supabaseUser.id}/${batchTs}-${i}-${safeName}`;
+      const storagePath = `${activeUser.id}/${batchTs}-${i}-${safeName}`;
 
       try {
         const { error: upErr } = await supabase.storage
@@ -849,19 +875,22 @@ export default function PlannerCalendar({
           setMediaItems((prev) =>
             prev.map((m) => (m.id === slide.id ? { ...m, uploading: false } : m))
           );
-          showToast(
-            'Temp bucket not initialized yet — click "Setup Temp Cloud" above to enable Supabase uploads!',
-            'error'
-          );
+          const errDetail = `Supabase scheduled-media upload error: ${upErr.message || 'Check bucket RLS policies'}`;
+          setUploadErrorMsg(errDetail);
+          showToast(errDetail, 'error');
         } else {
           // Mint a 48h Signed URL from the private `scheduled-media` bucket!
-          const { data: signedData } = await supabase.storage
+          const { data: signedData, error: signErr } = await supabase.storage
             .from(TEMP_BUCKET)
             .createSignedUrl(storagePath, 172800);
-          const { data: pubUrlData } = supabase.storage
-            .from(TEMP_BUCKET)
-            .getPublicUrl(storagePath);
-          const resolvedUrl = signedData?.signedUrl || pubUrlData?.publicUrl || slide.url;
+          if (signErr || !signedData?.signedUrl) {
+            const errDetail = `Uploaded to scheduled-media, but could not mint Signed URL: ${
+              signErr?.message || 'Check SELECT RLS policy on storage.objects'
+            }`;
+            setUploadErrorMsg(errDetail);
+            showToast(errDetail, 'error');
+          }
+          const resolvedUrl = signedData?.signedUrl || slide.url;
           setSupabaseStatus('connected');
           setMediaItems((prev) =>
             prev.map((m) =>
@@ -869,7 +898,7 @@ export default function PlannerCalendar({
                 ? {
                     ...m,
                     url: resolvedUrl,
-                    isRemote: true,
+                    isRemote: Boolean(signedData?.signedUrl),
                     storagePath,
                     uploading: false,
                     _rawFile: undefined,
@@ -877,8 +906,13 @@ export default function PlannerCalendar({
                 : m
             )
           );
+          if (signedData?.signedUrl) {
+            showToast('☁️ Stored temporarily in Supabase scheduled-media (auto-deletes after publish)!');
+          }
         }
-      } catch {
+      } catch (err) {
+        const errDetail = `Upload failed: ${err?.message || 'Network error'}`;
+        setUploadErrorMsg(errDetail);
         setMediaItems((prev) =>
           prev.map((m) => (m.id === slide.id ? { ...m, uploading: false } : m))
         );
@@ -1036,6 +1070,18 @@ export default function PlannerCalendar({
       return;
     }
     const record = buildPostRecord(targetStatus);
+    if (
+      targetStatus === 'scheduled' &&
+      record.format !== 'text' &&
+      record.media_urls.length === 0 &&
+      record.storage_paths.length === 0
+    ) {
+      showToast(
+        'Upload your Reel/image first (stored temporarily in Supabase scheduled-media) before scheduling!',
+        'error'
+      );
+      return;
+    }
     const exists = posts.some((p) => p.id === record.id);
     const next = exists
       ? posts.map((p) => (p.id === record.id ? { ...p, ...record } : p))
@@ -1050,9 +1096,9 @@ export default function PlannerCalendar({
     showToast(
       targetStatus === 'draft'
         ? 'Saved draft in Planning Calendar!'
-        : `Scheduled across ${record.platforms.length} platform(s) for ${record.scheduled_date} @ ${formatTime12h(
+        : `⏰ Scheduled for ${record.scheduled_date} @ ${formatTime12h(
             record.scheduled_time
-          )}!`
+          )} (stored temporarily in Supabase scheduled-media until live publish)!`
     );
   };
 
@@ -1063,7 +1109,19 @@ export default function PlannerCalendar({
     }
     const record = postInput || buildPostRecord('publishing');
     setPublishing(true);
+    setPublishStageText('Preparing cloud media & tokens...');
     try {
+      let activeUser = supabaseUser;
+      if (!activeUser) {
+        try {
+          const { data: uRes } = await supabase.auth.getUser();
+          activeUser = uRes?.user || null;
+          if (activeUser) setSupabaseUser(activeUser);
+        } catch {
+          activeUser = null;
+        }
+      }
+
       const mergedTokens = {};
       PLATFORMS.forEach((pl) => {
         const localCfg = platformTokens?.[pl.id] || {};
@@ -1081,9 +1139,34 @@ export default function PlannerCalendar({
         };
       });
 
+      // Always pull latest tokens from Supabase `user_platform_tokens` if any selected platform lacks one in memory
+      if (
+        activeUser &&
+        record.platforms.some((pid) => !(mergedTokens[pid]?.access_token || '').trim())
+      ) {
+        try {
+          const { data: freshTokRows } = await supabase
+            .from('user_platform_tokens')
+            .select('platform, access_token, platform_user_id')
+            .eq('user_id', activeUser.id);
+          if (Array.isArray(freshTokRows)) {
+            freshTokRows.forEach((tr) => {
+              if (tr?.platform && tr?.access_token) {
+                mergedTokens[tr.platform] = {
+                  access_token: tr.access_token.trim(),
+                  account_id: tr.platform_user_id || mergedTokens[tr.platform]?.account_id || '',
+                };
+              }
+            });
+          }
+        } catch {
+          // ignore if offline
+        }
+      }
+
       // Mint fresh 1-hour Signed URLs from private `scheduled-media` bucket right before dispatch!
       let dispatchMediaUrls = Array.isArray(record.media_urls) ? [...record.media_urls] : [];
-      if (supabaseUser && Array.isArray(record.storage_paths) && record.storage_paths.length > 0) {
+      if (activeUser && Array.isArray(record.storage_paths) && record.storage_paths.length > 0) {
         try {
           const { data: signedBatch } = await supabase.storage
             .from(TEMP_BUCKET)
@@ -1098,44 +1181,103 @@ export default function PlannerCalendar({
         }
       }
 
-      let dispatchData = null;
-      try {
-        const resp = await fetch('/api/publish', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            post: {
-              id: record.id,
-              title: record.title,
-              caption: record.caption,
-              captions: record.captions,
-              format: record.format,
-              platforms: record.platforms,
-              media_urls: dispatchMediaUrls,
-              first_comment: record.first_comment,
-            },
-            platform_tokens: mergedTokens,
-          }),
-        });
-        if (resp.ok) {
-          dispatchData = await resp.json();
+      // Strict pre-flight checks on manual "Publish Live Now" so it NEVER silently fake-queues!
+      if (!isAutoScheduled) {
+        if (record.format !== 'text' && dispatchMediaUrls.length === 0) {
+          showToast(
+            'Upload a video or image first (wait for the green Supabase Cloud badge) before clicking Publish Live Now!',
+            'error'
+          );
+          return;
         }
-      } catch {
-        // Offline fallback
+        const liveTokenPlatforms = record.platforms.filter((pid) =>
+          Boolean((mergedTokens[pid]?.access_token || '').trim())
+        );
+        if (liveTokenPlatforms.length === 0) {
+          showToast(
+            'No live API token saved yet for your selected platform(s)! Go to Connect → Instagram → paste & save your token once, then click Publish Live Now.',
+            'error'
+          );
+          return;
+        }
       }
 
-      const results =
-        dispatchData?.results ||
-        record.platforms.map((pid) => ({
-          platform: pid,
-          mode: 'queued_preview',
-          status: 'queued',
-          message: `Queued in Safe Preview Mode (connect ${pid} token for live auto-push).`,
-        }));
+      setPublishStageText('Sending media to platform API...');
+      const resp = await fetch('/api/publish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          post: {
+            id: record.id,
+            title: record.title,
+            caption: record.caption,
+            captions: record.captions,
+            format: record.format,
+            platforms: record.platforms,
+            media_urls: dispatchMediaUrls,
+            first_comment: record.first_comment,
+          },
+          platform_tokens: mergedTokens,
+        }),
+      });
 
-      const liveCount = results.filter((r) => r.mode === 'live_published').length;
+      if (!resp.ok) {
+        const errBody = await resp.json().catch(() => ({}));
+        throw new Error(
+          errBody.detail || errBody.error || `/api/publish failed with HTTP ${resp.status}`
+        );
+      }
+
+      const dispatchData = await resp.json();
+      let results = Array.isArray(dispatchData?.results) ? [...dispatchData.results] : [];
+
+      // Two-Phase Reel Transcode Poller: wait until Instagram finishes video processing & calls media_publish!
+      const igIdx = results.findIndex(
+        (r) => r.platform === 'instagram' && r.mode === 'processing_container' && r.creation_id
+      );
+      if (igIdx !== -1) {
+        const pendingIg = results[igIdx];
+        const igTok = mergedTokens.instagram?.access_token || '';
+        for (let attempt = 1; attempt <= 35; attempt++) {
+          setPublishStageText(`🎬 Instagram transcoding Reel (${attempt * 3}s)...`);
+          await new Promise((resolve) => setTimeout(resolve, 3000));
+          const finResp = await fetch('/api/publish', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              action: 'finalize_instagram',
+              creation_id: pendingIg.creation_id,
+              account_id: pendingIg.account_id,
+              api_base: pendingIg.api_base || 'https://graph.facebook.com/v27.0',
+              access_token: igTok,
+              first_comment: record.first_comment || '',
+            }),
+          });
+          if (finResp.ok) {
+            const finData = await finResp.json();
+            if (finData?.result && finData.result.mode !== 'processing_container') {
+              results[igIdx] = finData.result;
+              break;
+            }
+          }
+          if (attempt === 35) {
+            results[igIdx] = {
+              platform: 'instagram',
+              mode: 'live_error',
+              status: 'failed',
+              message: 'Instagram video transcoding took longer than 105s — check Instagram in 1 min or retry.',
+            };
+          }
+        }
+      }
+
+      const livePublishedList = results.filter((r) => r.mode === 'live_published');
+      const liveErrorList = results.filter((r) => r.mode === 'live_error');
+      const skippedNoTokenList = results.filter((r) => r.mode === 'queued_preview');
+      const liveCount = livePublishedList.length;
+
       const finalStatus =
-        dispatchData?.overall_status || (liveCount > 0 ? 'published' : 'queued');
+        liveCount > 0 ? 'published' : liveErrorList.length > 0 ? 'failed' : 'queued';
 
       // Automatically purge temporary Supabase Storage files once live publish completes!
       let cleanedUp = Boolean(record.media_cleaned_up);
@@ -1145,6 +1287,7 @@ export default function PlannerCalendar({
         Array.isArray(record.storage_paths) &&
         record.storage_paths.length > 0
       ) {
+        setPublishStageText('Cleaning up temporary Supabase file...');
         const removed = await deleteTempStoragePaths(record.storage_paths);
         if (removed > 0) cleanedUp = true;
       }
@@ -1165,32 +1308,41 @@ export default function PlannerCalendar({
         : [updatedRecord, ...prevList];
       persistPostsLocal(next);
       await syncPostToBackend(updatedRecord);
-      if (!postInput) {
+      if (!postInput && finalStatus === 'published') {
         maybeRegisterDmTrigger(updatedRecord);
         setComposerOpen(false);
       }
       triggerFairyWand?.();
 
       const prefix = isAutoScheduled ? '⏰ Scheduled Auto-Post: ' : '';
-      const firstLiveErr = results.find((r) => r.mode === 'live_error');
       if (liveCount > 0) {
+        const liveNames = livePublishedList.map((r) => r.platform.toUpperCase()).join(', ');
+        const skippedNote =
+          skippedNoTokenList.length > 0
+            ? ` (Skipped ${skippedNoTokenList.map((r) => r.platform).join(', ')} — no API token yet)`
+            : '';
         showToast(
-          `${prefix}Published live to ${liveCount} platform(s)${
-            cleanedUp ? ' & purged temp Supabase media!' : '!'
-          }`
+          `${prefix}🎉 LIVE on ${liveNames}${
+            cleanedUp ? ' & temp video deleted from Supabase!' : '!'
+          }${skippedNote}`
         );
-      } else if (firstLiveErr) {
+      } else if (liveErrorList.length > 0) {
+        const firstErr = liveErrorList[0];
         showToast(
-          `${prefix}${firstLiveErr.platform.toUpperCase()} publish error: ${firstLiveErr.message}`,
+          `${prefix}${firstErr.platform.toUpperCase()} publish error: ${firstErr.message}`,
           'error'
         );
       } else {
         showToast(
-          `${prefix}Queued across ${results.length} connected platform(s)! Authorize 1-Click Auto-Post in Connect anytime.`
+          `${prefix}No selected platform had a live API token — connect a token in Connect first!`,
+          'error'
         );
       }
+    } catch (err) {
+      showToast(`Publish failed: ${err?.message || String(err)}`, 'error');
     } finally {
       setPublishing(false);
+      setPublishStageText('');
     }
   };
 
@@ -1979,6 +2131,27 @@ export default function PlannerCalendar({
                       );
                     })}
                   </div>
+                  {(() => {
+                    const liveSelected = selectedPlatforms.filter((id) => isPlatformLiveReady(id));
+                    const missingSelected = selectedPlatforms.filter((id) => !isPlatformLiveReady(id));
+                    if (missingSelected.length === 0) return null;
+                    return (
+                      <div className="mt-2 p-2.5 rounded-xl bg-[#FFF8E7] border border-[#19154E] text-[11px] font-semibold text-[#19154E]">
+                        {liveSelected.length > 0 ? (
+                          <>
+                            🟢 <strong>Live API Ready:</strong> {liveSelected.map((s) => s.toUpperCase()).join(', ')}.{' '}
+                            <span className="text-neutral-700">
+                              ({missingSelected.map((s) => s.toUpperCase()).join(', ')} don&apos;t have API tokens connected yet, so only {liveSelected.map((s) => s.toUpperCase()).join(', ')} will publish live right now.)
+                            </span>
+                          </>
+                        ) : (
+                          <>
+                            ⚠️ None of the selected platforms have a saved API token yet — paste your Instagram token once in <strong>Connect → Instagram</strong> to unlock live publishing!
+                          </>
+                        )}
+                      </div>
+                    );
+                  })()}
                 </div>
 
                 {/* 3. Supabase Temp Cloud Media Uploader */}
@@ -1991,9 +2164,23 @@ export default function PlannerCalendar({
                       <span className="text-[11px] font-bold text-neutral-600">
                         {uploadingCount > 0
                           ? `☁️ Uploading ${uploadingCount} file(s) to Supabase...`
+                          : mediaItems.some((m) => m.storagePath && m.isRemote)
+                          ? '✅ Stored in Supabase scheduled-media'
                           : `${mediaItems.length} file(s) staged`}
                       </span>
                     </div>
+
+                    {uploadErrorMsg && (
+                      <div className="p-2.5 rounded-xl bg-red-50 border border-red-400 text-[11px] font-bold text-red-700">
+                        ⚠️ {uploadErrorMsg}
+                      </div>
+                    )}
+
+                    {mediaItems.some((m) => m.storagePath && m.isRemote) && !uploadErrorMsg && (
+                      <div className="p-2.5 rounded-xl bg-[#C8F904]/40 border border-[#19154E] text-[11px] font-bold text-[#19154E]">
+                        ☁️ Stored temporarily in your private Supabase bucket (<code className="font-mono-code">scheduled-media</code>) with a signed URL — automatically deleted right after your post goes live!
+                      </div>
+                    )}
 
                     <div
                       onDragOver={(e) => e.preventDefault()}
@@ -2436,10 +2623,8 @@ export default function PlannerCalendar({
                   <Send className="w-4 h-4" />
                   <span>
                     {publishing
-                      ? 'Publishing...'
-                      : `Publish Now to ${selectedPlatforms.length} Platform${
-                          selectedPlatforms.length > 1 ? 's' : ''
-                        }`}
+                      ? publishStageText || 'Publishing Live...'
+                      : `Publish Live Now`}
                   </span>
                 </button>
               </div>
