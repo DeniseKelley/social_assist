@@ -871,88 +871,101 @@ export default function App() {
         return;
       }
       if (event.data.type === 'SA_OAUTH_SUCCESS') {
-        const { platform, access_token, account_id, handle } = event.data;
+        const { platform, access_token, account_id, handle, also_connected } = event.data;
         const emailScope = sessionStorage.getItem('sa_user_email') || '';
         const meta = PLATFORM_BY_ID[platform] || PLATFORM_BY_ID.instagram;
-        const cleanTok = String(access_token || '').trim();
-        const cleanHandle =
-          extractHandleForPlatform(handle || '') || String(handle || '').replace(/^@/, '') || 'creator';
-        const cleanAccId = String(account_id || '').trim();
+
+        const allEntries = [
+          { platform: meta.id, access_token, account_id, handle },
+          ...(Array.isArray(also_connected) ? also_connected : []),
+        ].filter((e) => e && e.platform && PLATFORM_BY_ID[e.platform]);
 
         const cMap = loadSavedConnectionsMap(emailScope);
         const tMap = loadSavedTokensMap(emailScope);
-
-        if (cleanTok) {
-          tMap[meta.id] = cleanTok;
-          localStorage.setItem(scopedKey('sa_tokens_map', emailScope), JSON.stringify(tMap));
-          if (meta.id === 'instagram') {
-            localStorage.setItem(scopedKey('sa_ig_access_token', emailScope), cleanTok);
-          }
-
-          let plannerToks = {};
-          try {
-            plannerToks =
-              JSON.parse(localStorage.getItem(scopedKey('sa_platform_tokens', emailScope)) || '{}') ||
-              {};
-          } catch {
-            plannerToks = {};
-          }
-          plannerToks[meta.id] = {
-            ...(plannerToks[meta.id] || {}),
-            access_token: cleanTok,
-            account_id: cleanAccId,
-          };
-          localStorage.setItem(
-            scopedKey('sa_platform_tokens', emailScope),
-            JSON.stringify(plannerToks)
-          );
-
-          // Sync token + IG_USER_ID + IG_USERNAME to RLS-isolated Supabase `user_platform_tokens`
-          upsertPlatformTokenToSupabase({
-            platform: meta.id,
-            accessToken: cleanTok,
-            platformUserId: cleanAccId,
-            username: cleanHandle,
-          }).catch(() => {});
+        let plannerToks = {};
+        try {
+          plannerToks =
+            JSON.parse(localStorage.getItem(scopedKey('sa_platform_tokens', emailScope)) || '{}') ||
+            {};
+        } catch {
+          plannerToks = {};
         }
 
-        let nextConns = {
-          ...cMap,
-          [meta.id]: {
+        let nextConns = { ...cMap };
+        const connectedLabels = [];
+
+        for (const entry of allEntries) {
+          const entryMeta = PLATFORM_BY_ID[entry.platform];
+          const cleanTok = String(entry.access_token || '').trim();
+          const cleanHandle =
+            extractHandleForPlatform(entry.handle || '') ||
+            String(entry.handle || '').replace(/^@/, '') ||
+            'creator';
+          const cleanAccId = String(entry.account_id || '').trim();
+
+          if (cleanTok) {
+            tMap[entryMeta.id] = cleanTok;
+            if (entryMeta.id === 'instagram') {
+              localStorage.setItem(scopedKey('sa_ig_access_token', emailScope), cleanTok);
+            }
+            plannerToks[entryMeta.id] = {
+              ...(plannerToks[entryMeta.id] || {}),
+              access_token: cleanTok,
+              account_id: cleanAccId,
+              username: cleanHandle,
+            };
+            upsertPlatformTokenToSupabase({
+              platform: entryMeta.id,
+              accessToken: cleanTok,
+              platformUserId: cleanAccId,
+              username: cleanHandle,
+            }).catch(() => {});
+          }
+
+          nextConns[entryMeta.id] = {
             handle: cleanHandle,
             has_access_token: Boolean(cleanTok),
             account_id: cleanAccId,
             oauth_connected: true,
             connected_at: new Date().toISOString(),
-          },
-        };
-        localStorage.setItem(scopedKey('sa_connections_map', emailScope), JSON.stringify(nextConns));
-        if (meta.id === 'instagram') {
-          localStorage.setItem(
-            scopedKey('sa_connection', emailScope),
-            JSON.stringify({
-              instagram_handle: cleanHandle,
-              has_access_token: Boolean(cleanTok),
-              account_id: cleanAccId,
-            })
-          );
+          };
+          if (entryMeta.id === 'instagram') {
+            localStorage.setItem(
+              scopedKey('sa_connection', emailScope),
+              JSON.stringify({
+                instagram_handle: cleanHandle,
+                has_access_token: Boolean(cleanTok),
+                account_id: cleanAccId,
+              })
+            );
+          }
+
+          connectedLabels.push(`${entryMeta.name} (@${cleanHandle})`);
+          fetchPlatformAnalytics({
+            platformId: entryMeta.id,
+            overrideHandle: cleanHandle,
+            forceRefresh: true,
+            emailOverride: emailScope,
+          }).catch(() => {});
         }
 
+        localStorage.setItem(scopedKey('sa_tokens_map', emailScope), JSON.stringify(tMap));
+        localStorage.setItem(
+          scopedKey('sa_platform_tokens', emailScope),
+          JSON.stringify(plannerToks)
+        );
+        localStorage.setItem(scopedKey('sa_connections_map', emailScope), JSON.stringify(nextConns));
+
+        const primaryHandle = nextConns[meta.id]?.handle || 'creator';
         setConnectionsMap(nextConns);
-        setHandleInput(meta.buildProfileUrl(cleanHandle));
+        setHandleInput(meta.buildProfileUrl(primaryHandle));
         setSelectedPlatform(meta.id);
         setConnectStatusMsg({
           type: 'success',
-          text: `⚡ 1-Click Connected @${cleanHandle} (${meta.name}) — Live Analytics & Auto-Publishing Ready!`,
+          text: `⚡ 1-Click Connected ${connectedLabels.join(' + ')} — Saved to Supabase & Planner Publishing Unlocked!`,
         });
-        showToast(`⚡ Connected @${cleanHandle} (${meta.name}) with 1-Click Auto-Publishing!`);
+        showToast(`⚡ Connected ${connectedLabels.join(' + ')} — Auto-Publishing Ready!`);
         triggerFairyWand();
-        fetchPlatformAnalytics({
-          platformId: meta.id,
-          overrideHandle: cleanHandle,
-          forceRefresh: true,
-          emailOverride: emailScope,
-        }).catch(() => {});
         return;
       }
       if (event.data.type === 'IG_OAUTH_SUCCESS') {
@@ -1066,8 +1079,8 @@ export default function App() {
     const meta = PLATFORM_BY_ID[connectPlatform] || PLATFORM_BY_ID.instagram;
     const extracted = extractHandleForPlatform(handleInput);
 
-    // If 1-Click OAuth is configured on the server and no handle was typed, launch OAuth directly!
-    if (!extracted && oauthProviders[meta.id]) {
+    // If 1-Click OAuth is configured on the server, launch the OAuth popup directly (no manual token or handle required)!
+    if (oauthProviders[meta.id]) {
       handleOneClickOAuthConnect(meta.id);
       return;
     }
@@ -4724,12 +4737,9 @@ export default function App() {
                       </button>
                     </div>
                     <p className="text-[11px] text-neutral-600">
-                      Set your platform&apos;s Client ID &amp; Secret once in Vercel Environment Variables (e.g.{' '}
-                      <code className="font-mono-code">INSTAGRAM_APP_ID</code>,{' '}
-                      <code className="font-mono-code">TIKTOK_CLIENT_KEY</code>,{' '}
-                      <code className="font-mono-code">GOOGLE_CLIENT_ID</code>,{' '}
-                      <code className="font-mono-code">FACEBOOK_APP_ID</code>,{' '}
-                      <code className="font-mono-code">X_CLIENT_ID</code>) and every user gets 1-Click OAuth auto-publishing!
+                      For 1-Click OAuth in Development Mode (your accounts + approved testers), add in Vercel Environment Variables:{' '}
+                      <code className="font-mono-code">META_APP_SECRET</code> (unlocks <strong>both Instagram &amp; Facebook Page</strong> via Meta App <code className="font-mono-code">2152485965366776</code>) and{' '}
+                      <code className="font-mono-code">THREADS_APP_ID</code> + <code className="font-mono-code">THREADS_APP_SECRET</code> (unlocks <strong>Threads</strong>) — zero manual token pasting needed!
                     </p>
                   </div>
                   <div>
