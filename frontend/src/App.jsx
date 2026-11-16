@@ -1148,6 +1148,29 @@ export default function App() {
               }`
             );
           }
+        } else if (meta.id === 'facebook') {
+          // Verify Facebook Page via System-User (`v27.0/me/assigned_pages`) or User (`v27.0/me/accounts`)
+          try {
+            const apResp = await fetch(
+              `https://graph.facebook.com/v27.0/me/assigned_pages?fields=id,name&access_token=${encodeURIComponent(
+                cleanToken
+              )}`
+            );
+            if (apResp.ok) {
+              const apJson = await apResp.json();
+              const firstPage = (apJson?.data || []).find((p) => p && p.id);
+              if (firstPage) {
+                verifiedAccId = String(firstPage.id);
+                verifiedUsername =
+                  cleanHandle ||
+                  String(firstPage.name || firstPage.id)
+                    .replace(/\s+/g, '')
+                    .toLowerCase();
+              }
+            }
+          } catch {
+            // Fall through to /api/analytics strict verification
+          }
         }
 
         // Fetch live analytics telemetry (strict if token wasn't already verified via assigned_instagram_accounts)
@@ -4637,11 +4660,18 @@ export default function App() {
                 )}
               </form>
 
-              {/* Unified Login / API Token Section (Auto-open for Instagram so pasting token is 1 click) */}
-              <details open={connectMeta.id === 'instagram'} className="pt-2 border-t border-neutral-200 text-xs">
+              {/* Unified Login / API Token Section (Auto-open for Meta channels: Instagram, Facebook, Threads) */}
+              <details
+                open={['instagram', 'facebook', 'threads'].includes(connectMeta.id)}
+                className="pt-2 border-t border-neutral-200 text-xs"
+              >
                 <summary className="cursor-pointer font-bold text-neutral-600 hover:text-[#19154E] select-none py-1">
                   ⚙️ {connectMeta.id === 'instagram'
                     ? 'Instagram Unified Login Token (v27.0 /me/assigned_instagram_accounts)'
+                    : connectMeta.id === 'facebook'
+                    ? 'Facebook Page Unified / Graph Token (v27.0 /me/assigned_pages)'
+                    : connectMeta.id === 'threads'
+                    ? 'Threads API Token (graph.threads.net/v1.0)'
                     : 'App Owner 1-Click OAuth & Advanced Token Setup (Optional)'}
                 </summary>
                 <form
@@ -4713,6 +4743,10 @@ export default function App() {
                       placeholder={
                         connectMeta.id === 'instagram'
                           ? 'Paste EAA... Unified Login token (verifies via v27.0/me/assigned_instagram_accounts)'
+                          : connectMeta.id === 'facebook'
+                          ? 'Paste EAA... System User / Page token (with pages_show_list + pages_read_engagement + pages_manage_posts)'
+                          : connectMeta.id === 'threads'
+                          ? 'Paste THAA... Threads API token (threads_basic + threads_content_publish)'
                           : connectMeta.tokenPlaceholder
                       }
                       className="w-full px-3.5 py-2 rounded-xl bg-white border-2 border-[#19154E] text-xs font-mono-code"

@@ -1231,41 +1231,46 @@ export default function PlannerCalendar({
       const dispatchData = await resp.json();
       let results = Array.isArray(dispatchData?.results) ? [...dispatchData.results] : [];
 
-      // Two-Phase Reel Transcode Poller: wait until Instagram finishes video processing & calls media_publish!
-      const igIdx = results.findIndex(
-        (r) => r.platform === 'instagram' && r.mode === 'processing_container' && r.creation_id
-      );
-      if (igIdx !== -1) {
-        const pendingIg = results[igIdx];
-        const igTok = mergedTokens.instagram?.access_token || '';
+      // Two-Phase Video Transcode Poller: wait until Instagram & Threads finish video processing!
+      for (const targetPlat of ['instagram', 'threads']) {
+        const pIdx = results.findIndex(
+          (r) => r.platform === targetPlat && r.mode === 'processing_container' && r.creation_id
+        );
+        if (pIdx === -1) continue;
+        const pendingItem = results[pIdx];
+        const platTok = mergedTokens[targetPlat]?.access_token || '';
+        const actionName =
+          targetPlat === 'instagram' ? 'finalize_instagram' : 'finalize_threads';
+        const labelName = targetPlat === 'instagram' ? 'Instagram Reel' : 'Threads video';
+
         for (let attempt = 1; attempt <= 35; attempt++) {
-          setPublishStageText(`🎬 Instagram transcoding Reel (${attempt * 3}s)...`);
+          setPublishStageText(`🎬 ${labelName} transcoding (${attempt * 3}s)...`);
           await new Promise((resolve) => setTimeout(resolve, 3000));
           const finResp = await fetch('/api/publish', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              action: 'finalize_instagram',
-              creation_id: pendingIg.creation_id,
-              account_id: pendingIg.account_id,
-              api_base: pendingIg.api_base || 'https://graph.facebook.com/v27.0',
-              access_token: igTok,
+              action: actionName,
+              creation_id: pendingItem.creation_id,
+              account_id: pendingItem.account_id || '',
+              api_base: pendingItem.api_base || 'https://graph.facebook.com/v27.0',
+              access_token: platTok,
               first_comment: record.first_comment || '',
             }),
           });
           if (finResp.ok) {
             const finData = await finResp.json();
             if (finData?.result && finData.result.mode !== 'processing_container') {
-              results[igIdx] = finData.result;
+              results[pIdx] = finData.result;
               break;
             }
           }
           if (attempt === 35) {
-            results[igIdx] = {
-              platform: 'instagram',
+            results[pIdx] = {
+              platform: targetPlat,
               mode: 'live_error',
               status: 'failed',
-              message: 'Instagram video transcoding took longer than 105s — check Instagram in 1 min or retry.',
+              message: `${labelName} transcoding took longer than 105s — check ${targetPlat} in 1 min or retry.`,
             };
           }
         }
