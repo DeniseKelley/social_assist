@@ -637,7 +637,7 @@ export default function App() {
             const res = await fetchPlatformAnalytics({
               platformId: pid,
               overrideHandle: handleForPid,
-              forceRefresh: false,
+              forceRefresh: true,
               emailOverride,
             });
             return [pid, res];
@@ -3563,23 +3563,35 @@ export default function App() {
                 </div>
                 <p className="text-xs font-medium text-neutral-600 mt-0.5 text-pretty">
                   {selectedPlatform === 'all'
-                    ? `Combined live followers, +followers gained, views, likes, and engagement across ${activeComboIds.length} selected channel(s).`
-                    : `Real-time ${activeAudienceLabel.toLowerCase()}, +followers gained, and Reel metrics for @${profile.username || 'your_account'}.`}
+                    ? `All-time lifespan views, +followers gained, likes, and engagement across ${activeComboIds.length} selected channel(s) (${posts.length} synced Reels & posts).`
+                    : `All-time lifespan ${activeAudienceLabel.toLowerCase()}, +followers gained, and Reel metrics for @${profile.username || 'your_account'} (${posts.length} synced).`}
                 </p>
               </div>
 
-              <button
-                type="button"
-                onClick={() => {
-                  setActiveTab('strategy');
-                  handleRunOpenClaw();
-                }}
-                className="editorial-btn px-3.5 py-2 rounded-xl bg-[#FF7EB6] text-[#19154E] text-xs font-bold inline-flex items-center gap-1.5 self-start sm:self-auto shrink-0"
-              >
-                <Sparkles className="w-3.5 h-3.5" />
-                <span>Analyze in AI Strategy</span>
-                <ArrowUpRight className="w-3.5 h-3.5" />
-              </button>
+              <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto shrink-0">
+                <button
+                  type="button"
+                  disabled={syncing}
+                  onClick={handleRefreshAnalytics}
+                  className="editorial-btn px-3 py-2 rounded-xl bg-white hover:bg-[#F5EEFF] text-[#19154E] text-xs font-bold inline-flex items-center gap-1.5 disabled:opacity-60"
+                  title="Force re-sync entire account lifespan stats"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${syncing ? 'animate-spin' : ''}`} />
+                  <span>{syncing ? 'Syncing Lifespan...' : 'Sync Lifespan'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveTab('strategy');
+                    handleRunOpenClaw();
+                  }}
+                  className="editorial-btn px-3.5 py-2 rounded-xl bg-[#FF7EB6] text-[#19154E] text-xs font-bold inline-flex items-center gap-1.5"
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  <span>Analyze in AI Strategy</span>
+                  <ArrowUpRight className="w-3.5 h-3.5" />
+                </button>
+              </div>
             </div>
 
             {/* 6 Bold Editorial Metric Cards — Live Followers, +Followers Gained, Views, Likes, Comments, Engagement */}
@@ -3622,10 +3634,10 @@ export default function App() {
                 type="button"
                 onClick={() => setVideoSortBy('views')}
                 className="editorial-card-sm p-4 bg-[#FF7EB6] text-left hover:brightness-105 transition-all duration-150"
-                title="Click to rank Reels by Views in decreasing order"
+                title="Click to rank Reels by Lifetime Views in decreasing order"
               >
                 <div className="text-[11px] font-bold text-[#19154E] flex items-center justify-between">
-                  <span>TRACKED VIEWS</span>
+                  <span>LIFETIME VIEWS</span>
                   <Eye className="w-4 h-4 text-[#19154E]" />
                 </div>
                 <div className="font-display text-2xl font-bold text-[#19154E] mt-1.5 tabular-nums">
