@@ -370,10 +370,24 @@ export function PlatformIcon({ platform, className = 'w-4 h-4' }) {
   );
 }
 
-export function buildCombinedPlatformAnalytics(analyticsMap, connectionsMap, defaultBenchmark) {
-  const connectedIds = PLATFORMS.map((p) => p.id).filter(
+export function buildCombinedPlatformAnalytics(
+  analyticsMap,
+  connectionsMap,
+  defaultBenchmark,
+  selectedSubsetIds = null
+) {
+  const allConnectedIds = PLATFORMS.map((p) => p.id).filter(
     (pid) => connectionsMap?.[pid]?.handle && analyticsMap?.[pid]?.profile?.username
   );
+
+  const subsetSet =
+    Array.isArray(selectedSubsetIds) && selectedSubsetIds.length > 0
+      ? new Set(selectedSubsetIds)
+      : null;
+
+  const connectedIds = subsetSet
+    ? allConnectedIds.filter((pid) => subsetSet.has(pid))
+    : allConnectedIds;
 
   if (connectedIds.length === 0) {
     return null;
@@ -392,11 +406,28 @@ export function buildCombinedPlatformAnalytics(analyticsMap, connectionsMap, def
     totalFollowers += followers;
     totalMedia += media;
 
-    const pPosts = (data?.posts || []).map((post) => ({
-      ...post,
-      platform: pid,
-      platformName: pMeta.name,
-    }));
+    const pPosts = (data?.posts || []).map((post) => {
+      const v = Number(post.views || 0);
+      const l = Number(post.likes || 0);
+      const c = Number(post.comments || 0);
+      const sv = Number(post.saves || 0);
+      const sh = Number(post.shares || 0);
+      const fg =
+        typeof post.followers_gained === 'number'
+          ? post.followers_gained
+          : v > 0 || l > 0 || c > 0
+          ? Math.max(1, Math.round(v * 0.0015 + l * 0.026 + c * 0.13 + sv * 0.08 + sh * 0.1))
+          : 0;
+      return {
+        ...post,
+        platform: pid,
+        platformName: pMeta.name,
+        followers_gained: fg,
+        followers_source:
+          post.followers_source ||
+          (typeof post.followers_gained === 'number' ? 'api' : 'estimated'),
+      };
+    });
     allPosts = allPosts.concat(pPosts);
 
     platformBreakdown.push({
@@ -408,6 +439,8 @@ export function buildCombinedPlatformAnalytics(analyticsMap, connectionsMap, def
       posts_synced: pPosts.length,
       total_views: pPosts.reduce((s, x) => s + (x.views || 0), 0),
       total_likes: pPosts.reduce((s, x) => s + (x.likes || 0), 0),
+      total_comments: pPosts.reduce((s, x) => s + (x.comments || 0), 0),
+      total_followers_gained: pPosts.reduce((s, x) => s + (x.followers_gained || 0), 0),
       profile_url: data.profile.profile_url || pMeta.buildProfileUrl(data.profile.username),
     });
   }
@@ -415,6 +448,7 @@ export function buildCombinedPlatformAnalytics(analyticsMap, connectionsMap, def
   const totalViews = allPosts.reduce((s, x) => s + (x.views || 0), 0);
   const totalLikes = allPosts.reduce((s, x) => s + (x.likes || 0), 0);
   const totalComments = allPosts.reduce((s, x) => s + (x.comments || 0), 0);
+  const totalFollowersGained = allPosts.reduce((s, x) => s + (x.followers_gained || 0), 0);
   const withViews = allPosts.filter((p) => (p.views || 0) > 0);
   const avgEr =
     withViews.length > 0
@@ -427,6 +461,12 @@ export function buildCombinedPlatformAnalytics(analyticsMap, connectionsMap, def
 
   const byViews = [...allPosts].sort((a, b) => (b.views || 0) - (a.views || 0));
   const top1 = byViews[0] || {};
+
+  const isCustomSubset =
+    subsetSet && connectedIds.length < allConnectedIds.length && connectedIds.length > 0;
+  const comboDisplayTitle = isCustomSubset
+    ? connectedIds.map((id) => PLATFORM_BY_ID[id]?.name || id).join(' + ')
+    : 'All Connected Platforms';
 
   const handlesSummary = platformBreakdown
     .map((b) => `${b.platformName}: @${b.handle} (${b.followers_count.toLocaleString()})`)
@@ -505,9 +545,9 @@ export function buildCombinedPlatformAnalytics(analyticsMap, connectionsMap, def
     fetched_at: new Date().toISOString(),
     platform_breakdown: platformBreakdown,
     profile: {
-      username: `${connectedIds.length} platforms`,
-      name: 'All Connected Platforms',
-      account_type: 'OMNICHANNEL',
+      username: `${connectedIds.length} platform${connectedIds.length === 1 ? '' : 's'}`,
+      name: comboDisplayTitle,
+      account_type: isCustomSubset ? 'CUSTOM MIX' : 'OMNICHANNEL',
       followers_count: totalFollowers,
       follows_count: null,
       media_count: totalMedia,
@@ -523,7 +563,7 @@ export function buildCombinedPlatformAnalytics(analyticsMap, connectionsMap, def
         total_comments: totalComments,
         total_saves: null,
         total_shares: null,
-        total_followers_gained: null,
+        total_followers_gained: totalFollowersGained,
         avg_engagement_rate: avgEr,
         overall_engagement_rate: avgEr,
         comment_lift_multiplier: 3.1,

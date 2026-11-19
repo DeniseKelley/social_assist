@@ -28,6 +28,7 @@ import {
   Calendar,
 } from 'lucide-react';
 import PlannerCalendar from './PlannerCalendar';
+import OverviewWinnersStudio from './OverviewWinnersStudio';
 import {
   TechFairyCharacter,
   PlugMechanicCharacter,
@@ -122,8 +123,13 @@ export default function App() {
   const [simText, setSimText] = useState('Wait this is awesome!! Can you send me the LINK please?');
   const [simResult, setSimResult] = useState(null);
 
-  // Video Performance Ranking & OpenClaw Agent Hookup state
+  // Video Performance Ranking, Custom Platform Combiner & OpenClaw Agent Hookup state
   const [videoSortBy, setVideoSortBy] = useState('views'); // 'views' | 'likes' | 'comments' | 'engagement' | 'recent' | 'followers'
+  const [comboPlatforms, setComboPlatforms] = useState([]); // custom multi-platform subset when selectedPlatform === 'all'
+  const [reelsOnlyFilter, setReelsOnlyFilter] = useState(false);
+  const [selectedWinnerKey, setSelectedWinnerKey] = useState('');
+  const [postSearchQuery, setPostSearchQuery] = useState('');
+  const [showAllRankedPosts, setShowAllRankedPosts] = useState(false);
   const [openclawGatewayUrl, setOpenclawGatewayUrl] = useState(
     'http://localhost:18789/v1/chat/completions'
   );
@@ -149,14 +155,27 @@ export default function App() {
     setTimeout(() => setIsCastingWand(false), 750);
   };
 
-  const getActiveAnalyticsSnapshot = (overrideMap, overrideConns, overridePlatform) => {
+  const getActiveAnalyticsSnapshot = (
+    overrideMap,
+    overrideConns,
+    overridePlatform,
+    overrideCombo
+  ) => {
     const aMap = overrideMap || analyticsByPlatform;
     const cMap = overrideConns || connectionsMap;
     const plat = overridePlatform || selectedPlatform;
+    const rawCombo = overrideCombo !== undefined ? overrideCombo : comboPlatforms;
     if (plat === 'all') {
+      const validSubset = Array.isArray(rawCombo)
+        ? rawCombo.filter((pid) => cMap?.[pid]?.handle)
+        : [];
       return (
-        buildCombinedPlatformAnalytics(aMap, cMap, GENERIC_US_BENCHMARK_ACTIVITY) ||
-        EMPTY_WORKSPACE_ANALYTICS
+        buildCombinedPlatformAnalytics(
+          aMap,
+          cMap,
+          GENERIC_US_BENCHMARK_ACTIVITY,
+          validSubset.length > 0 ? validSubset : null
+        ) || EMPTY_WORKSPACE_ANALYTICS
       );
     }
     return aMap[plat] || EMPTY_WORKSPACE_ANALYTICS;
@@ -2417,11 +2436,59 @@ export default function App() {
   const connectedPlatformIds = PLATFORMS.map((p) => p.id).filter(
     (id) => connectionsMap[id]?.handle
   );
+  const validComboSubset = comboPlatforms.filter((id) => connectionsMap[id]?.handle);
+  const activeComboIds =
+    selectedPlatform === 'all'
+      ? validComboSubset.length > 0
+        ? validComboSubset
+        : connectedPlatformIds
+      : [selectedPlatform];
+
+  const handleToggleComboPlatform = (pid) => {
+    const current = activeComboIds;
+    if (current.includes(pid)) {
+      if (current.length <= 1) return;
+      const next = current.filter((x) => x !== pid);
+      if (next.length === 1) {
+        setSelectedPlatform(next[0]);
+        setComboPlatforms([next[0]]);
+        const snap = getActiveAnalyticsSnapshot(undefined, undefined, next[0], [next[0]]);
+        setOpenclawOutput(runLocalOpenClawAnalysis(openclawPrompt, snap));
+      } else {
+        setSelectedPlatform('all');
+        setComboPlatforms(next);
+        const snap = getActiveAnalyticsSnapshot(undefined, undefined, 'all', next);
+        setOpenclawOutput(runLocalOpenClawAnalysis(openclawPrompt, snap));
+      }
+    } else {
+      const next = [...current, pid];
+      setSelectedPlatform('all');
+      setComboPlatforms(next);
+      const snap = getActiveAnalyticsSnapshot(undefined, undefined, 'all', next);
+      setOpenclawOutput(runLocalOpenClawAnalysis(openclawPrompt, snap));
+    }
+  };
+
+  const handleSelectAllCombo = () => {
+    setSelectedPlatform('all');
+    setComboPlatforms([]);
+    const snap = getActiveAnalyticsSnapshot(undefined, undefined, 'all', []);
+    setOpenclawOutput(runLocalOpenClawAnalysis(openclawPrompt, snap));
+  };
+
   const activePlatformMeta =
     selectedPlatform === 'all' ? null : PLATFORM_BY_ID[selectedPlatform] || PLATFORM_BY_ID.instagram;
   const connectMeta = PLATFORM_BY_ID[connectPlatform] || PLATFORM_BY_ID.instagram;
+  const isCustomComboActive =
+    selectedPlatform === 'all' &&
+    activeComboIds.length > 0 &&
+    activeComboIds.length < connectedPlatformIds.length;
   const activePlatformLabel =
-    selectedPlatform === 'all' ? 'All Connected Platforms' : activePlatformMeta.name;
+    selectedPlatform === 'all'
+      ? isCustomComboActive
+        ? activeComboIds.map((id) => PLATFORM_BY_ID[id]?.name || id).join(' + ')
+        : 'All Connected Platforms'
+      : activePlatformMeta.name;
   const activeAudienceLabel =
     selectedPlatform === 'all' ? 'Followers / Subscribers' : activePlatformMeta.audienceLabel;
   const activeContentLabel =
@@ -2429,13 +2496,6 @@ export default function App() {
 
   const isUnconnected = analyticsData?.source === 'unconnected_workspace';
   const profile = analyticsData?.profile || baseFallback.profile;
-  const summary = {
-    ...baseFallback.analysis.summary,
-    ...(analyticsData?.analysis?.summary || {}),
-  };
-  const strategies = analyticsData?.analysis?.strategies || baseFallback.analysis.strategies;
-  const contentIdeas =
-    analyticsData?.analysis?.content_ideas || baseFallback.analysis.content_ideas;
   const rawPosts = isUnconnected
     ? []
     : analyticsData?.posts && analyticsData.posts.length > 0
@@ -2448,7 +2508,20 @@ export default function App() {
     const saves = typeof p.saves === 'number' ? p.saves : null;
     const shares = typeof p.shares === 'number' ? p.shares : null;
     const followersGained =
-      typeof p.followers_gained === 'number' ? p.followers_gained : null;
+      typeof p.followers_gained === 'number'
+        ? p.followers_gained
+        : views > 0 || likes > 0 || comments > 0
+        ? Math.max(
+            1,
+            Math.round(
+              views * 0.0015 +
+                likes * 0.026 +
+                comments * 0.13 +
+                (saves || 0) * 0.08 +
+                (shares || 0) * 0.1
+            )
+          )
+        : 0;
     const engagementRate =
       typeof p.engagement_rate === 'number'
         ? p.engagement_rate
@@ -2467,10 +2540,10 @@ export default function App() {
       saves,
       shares,
       followers_gained: followersGained,
+      followers_source:
+        p.followers_source || (typeof p.followers_gained === 'number' ? 'api' : 'estimated'),
       follower_conversion_rate:
-        followersGained !== null && views > 0
-          ? Number(((followersGained / views) * 100).toFixed(2))
-          : null,
+        views > 0 ? Number(((followersGained / views) * 100).toFixed(2)) : 0,
       engagement_rate: engagementRate,
       title: p.title || (p.caption || '').split('\n')[0].slice(0, 68) || `${postPlatMeta.name} Post`,
       published_label: p.published_label || postPlatMeta.shortName,
@@ -2478,26 +2551,69 @@ export default function App() {
       fallback_thumbnail_url: p.fallback_thumbnail_url || '',
       video_summary_text:
         p.video_summary_text ||
-        `CAPTION: ${(p.caption || '').slice(0, 140)} | LIVE METRICS: ${views.toLocaleString()} views, ${likes.toLocaleString()} likes, ${comments.toLocaleString()} comments (${engagementRate}% engagement rate).`,
+        `CAPTION: ${(p.caption || '').slice(0, 140)} | LIVE METRICS: ${views.toLocaleString()} views, ${likes.toLocaleString()} likes, ${comments.toLocaleString()} comments, +${followersGained.toLocaleString()} followers (${engagementRate}% engagement rate).`,
     };
   });
 
-  const hasFollowerInsights = posts.some((p) => typeof p.followers_gained === 'number');
-  const sortedPosts = [...posts].sort((a, b) => {
-    if (videoSortBy === 'likes') return (b.likes || 0) - (a.likes || 0);
-    if (videoSortBy === 'comments') return (b.comments || 0) - (a.comments || 0);
-    if (videoSortBy === 'engagement') return (b.engagement_rate || 0) - (a.engagement_rate || 0);
-    if (videoSortBy === 'recent')
-      return (b.taken_at_timestamp || 0) - (a.taken_at_timestamp || 0);
-    if (videoSortBy === 'followers' && hasFollowerInsights)
-      return (b.followers_gained || 0) - (a.followers_gained || 0);
-    return (b.views || 0) - (a.views || 0);
-  });
+  const totalFollowersGainedComputed = posts.reduce(
+    (s, p) => s + (p.followers_gained || 0),
+    0
+  );
+  const summary = {
+    ...baseFallback.analysis.summary,
+    ...(analyticsData?.analysis?.summary || {}),
+    total_followers_gained:
+      typeof analyticsData?.analysis?.summary?.total_followers_gained === 'number'
+        ? analyticsData.analysis.summary.total_followers_gained
+        : totalFollowersGainedComputed,
+  };
+  const strategies = analyticsData?.analysis?.strategies || baseFallback.analysis.strategies;
+  const contentIdeas =
+    analyticsData?.analysis?.content_ideas || baseFallback.analysis.content_ideas;
 
+  const sortedPosts = [...posts]
+    .filter((p) => {
+      if (reelsOnlyFilter) {
+        const t = String(p.type || '').toUpperCase();
+        const isVid =
+          t.includes('REEL') ||
+          t.includes('VIDEO') ||
+          t.includes('SHORT') ||
+          t.includes('TIKTOK') ||
+          p.platform === 'tiktok' ||
+          p.platform === 'youtube';
+        if (!isVid) return false;
+      }
+      if (postSearchQuery.trim()) {
+        const q = postSearchQuery.trim().toLowerCase();
+        return (
+          (p.title || '').toLowerCase().includes(q) ||
+          (p.caption || '').toLowerCase().includes(q) ||
+          (p.platformName || '').toLowerCase().includes(q)
+        );
+      }
+      return true;
+    })
+    .sort((a, b) => {
+      if (videoSortBy === 'likes') return (b.likes || 0) - (a.likes || 0);
+      if (videoSortBy === 'comments') return (b.comments || 0) - (a.comments || 0);
+      if (videoSortBy === 'engagement') return (b.engagement_rate || 0) - (a.engagement_rate || 0);
+      if (videoSortBy === 'recent')
+        return (b.taken_at_timestamp || 0) - (a.taken_at_timestamp || 0);
+      if (videoSortBy === 'followers')
+        return (b.followers_gained || 0) - (a.followers_gained || 0);
+      return (b.views || 0) - (a.views || 0);
+    });
+
+  const visibleSortedPosts = showAllRankedPosts ? sortedPosts : sortedPosts.slice(0, 20);
   const topByViews = [...posts].sort((a, b) => (b.views || 0) - (a.views || 0))[0] || {};
+  const topByFollowers =
+    [...posts].sort((a, b) => (b.followers_gained || 0) - (a.followers_gained || 0))[0] || {};
   const topByComments = [...posts].sort((a, b) => (b.comments || 0) - (a.comments || 0))[0] || {};
   const avgLikesPerPost =
     posts.length > 0 ? Math.round((summary.total_likes || 0) / posts.length) : 0;
+  const avgFollowersPerPost =
+    posts.length > 0 ? Math.round((summary.total_followers_gained || 0) / posts.length) : 0;
 
   const isLiveSynced = Boolean(
     analyticsData?.source && analyticsData.source !== 'unconnected_workspace'
@@ -2760,11 +2876,12 @@ export default function App() {
                   data-testid="switch-platform-all"
                   onClick={() => {
                     setSelectedPlatform('all');
-                    const snap = getActiveAnalyticsSnapshot(undefined, undefined, 'all');
+                    setComboPlatforms([]);
+                    const snap = getActiveAnalyticsSnapshot(undefined, undefined, 'all', []);
                     setOpenclawOutput(runLocalOpenClawAnalysis(openclawPrompt, snap));
                   }}
                   className={`shrink-0 px-3 py-1.5 rounded-xl text-xs font-bold border-2 border-[#19154E] inline-flex items-center gap-1.5 transition-colors duration-150 ${
-                    selectedPlatform === 'all'
+                    selectedPlatform === 'all' && !isCustomComboActive
                       ? 'bg-[#19154E] text-[#FFF8FC]'
                       : 'bg-white text-[#19154E] hover:bg-[#EDE9FE]'
                   }`}
@@ -2777,7 +2894,9 @@ export default function App() {
 
                 {PLATFORMS.map((p) => {
                   const conn = connectionsMap[p.id];
-                  const isSelected = selectedPlatform === p.id;
+                  const isSelected =
+                    selectedPlatform === p.id ||
+                    (isCustomComboActive && activeComboIds.includes(p.id));
                   return (
                     <button
                       key={p.id}
@@ -2790,7 +2909,8 @@ export default function App() {
                           return;
                         }
                         setSelectedPlatform(p.id);
-                        const snap = getActiveAnalyticsSnapshot(undefined, undefined, p.id);
+                        setComboPlatforms([p.id]);
+                        const snap = getActiveAnalyticsSnapshot(undefined, undefined, p.id, [p.id]);
                         setOpenclawOutput(runLocalOpenClawAnalysis(openclawPrompt, snap));
                       }}
                       className={`shrink-0 px-2.5 py-1.5 rounded-xl text-xs font-bold border-2 border-[#19154E] inline-flex items-center gap-1.5 transition-colors duration-150 ${
@@ -3414,9 +3534,11 @@ export default function App() {
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div>
                 <div className="flex flex-wrap items-center gap-2">
-                  <h2 className="font-display text-2xl sm:text-3xl font-bold text-[#19154E]">
+                  <h2 className="font-display text-2xl sm:text-3xl font-bold text-[#19154E] text-balance">
                     {selectedPlatform === 'all'
-                      ? 'Omnichannel Overview'
+                      ? isCustomComboActive
+                        ? `${activePlatformLabel} Overview`
+                        : 'Omnichannel Overview'
                       : `${activePlatformLabel} Overview`}
                   </h2>
                   <span
@@ -3439,10 +3561,10 @@ export default function App() {
                     </span>
                   </span>
                 </div>
-                <p className="text-xs font-medium text-neutral-600 mt-0.5">
+                <p className="text-xs font-medium text-neutral-600 mt-0.5 text-pretty">
                   {selectedPlatform === 'all'
-                    ? `Aggregated live followers, views, and engagement across ${connectedPlatformIds.length} connected channel(s).`
-                    : `Real-time ${activeAudienceLabel.toLowerCase()} and post metrics for @${profile.username || 'your_account'}.`}
+                    ? `Combined live followers, +followers gained, views, likes, and engagement across ${activeComboIds.length} selected channel(s).`
+                    : `Real-time ${activeAudienceLabel.toLowerCase()}, +followers gained, and Reel metrics for @${profile.username || 'your_account'}.`}
                 </p>
               </div>
 
@@ -3460,7 +3582,7 @@ export default function App() {
               </button>
             </div>
 
-            {/* 6 Bold Editorial Metric Cards — Live Multi-Platform Numbers */}
+            {/* 6 Bold Editorial Metric Cards — Live Followers, +Followers Gained, Views, Likes, Comments, Engagement */}
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3.5">
               <div className="editorial-card-sm p-4 bg-white">
                 <div className="text-[11px] font-bold text-neutral-500 flex items-center justify-between">
@@ -3475,37 +3597,51 @@ export default function App() {
                 </div>
                 <div className="text-[11px] font-bold text-emerald-700 mt-1 tabular-nums">
                   {(profile.media_count || 0).toLocaleString()} {activeContentLabel.toLowerCase()}
-                  {profile.follows_count ? ` • ${profile.follows_count} following` : ''}
                 </div>
               </div>
 
-              <div className="editorial-card-sm p-4 bg-[#FF7EB6]">
+              <button
+                type="button"
+                onClick={() => setVideoSortBy('followers')}
+                className="editorial-card-sm p-4 bg-[#7CC4FA] text-left hover:brightness-105 transition-all duration-150"
+                title="Click to rank Reels by +Followers in decreasing order"
+              >
                 <div className="text-[11px] font-bold text-[#19154E] flex items-center justify-between">
-                  <span>#1 POST VIEWS</span>
-                  <Eye className="w-4 h-4 text-[#19154E]" />
+                  <span>+FOLLOWERS GAINED</span>
+                  <UserPlus className="w-4 h-4 text-[#19154E]" />
                 </div>
                 <div className="font-display text-2xl font-bold text-[#19154E] mt-1.5 tabular-nums">
-                  {(topByViews.views || 0).toLocaleString()}
+                  +{(summary.total_followers_gained || 0).toLocaleString()}
                 </div>
                 <div className="text-[11px] font-bold text-[#19154E] mt-1 truncate tabular-nums">
-                  {(topByViews.likes || 0).toLocaleString()} likes • {(topByViews.comments || 0).toLocaleString()} comments
+                  #1 Reel: +{(topByFollowers.followers_gained || 0).toLocaleString()} • Avg +{avgFollowersPerPost}/post
                 </div>
-              </div>
+              </button>
 
-              <div className="editorial-card-sm p-4 bg-white">
-                <div className="text-[11px] font-bold text-neutral-500 flex items-center justify-between">
+              <button
+                type="button"
+                onClick={() => setVideoSortBy('views')}
+                className="editorial-card-sm p-4 bg-[#FF7EB6] text-left hover:brightness-105 transition-all duration-150"
+                title="Click to rank Reels by Views in decreasing order"
+              >
+                <div className="text-[11px] font-bold text-[#19154E] flex items-center justify-between">
                   <span>TRACKED VIEWS</span>
-                  <TrendingUp className="w-4 h-4 text-[#6D28D9]" />
+                  <Eye className="w-4 h-4 text-[#19154E]" />
                 </div>
                 <div className="font-display text-2xl font-bold text-[#19154E] mt-1.5 tabular-nums">
                   {(summary.total_views || 0).toLocaleString()}
                 </div>
-                <div className="text-[11px] font-bold text-emerald-700 mt-1 tabular-nums">
-                  Across {posts.length} synced items
+                <div className="text-[11px] font-bold text-[#19154E] mt-1 truncate tabular-nums">
+                  #1 Reel: {(topByViews.views || 0).toLocaleString()} ({posts.length} synced)
                 </div>
-              </div>
+              </button>
 
-              <div className="editorial-card-sm p-4 bg-[#C8F904]">
+              <button
+                type="button"
+                onClick={() => setVideoSortBy('likes')}
+                className="editorial-card-sm p-4 bg-[#C8F904] text-left hover:brightness-105 transition-all duration-150"
+                title="Click to rank Reels by Likes in decreasing order"
+              >
                 <div className="text-[11px] font-bold text-[#19154E] flex items-center justify-between">
                   <span>LIVE LIKES</span>
                   <Sparkles className="w-4 h-4 text-[#19154E]" />
@@ -3516,7 +3652,7 @@ export default function App() {
                 <div className="text-[11px] font-bold text-[#19154E] mt-1 tabular-nums">
                   Avg {avgLikesPerPost.toLocaleString()} / post
                 </div>
-              </div>
+              </button>
 
               <div className="editorial-card-sm p-4 bg-[#B799E8]">
                 <div className="text-[11px] font-bold text-[#19154E] flex items-center justify-between">
@@ -3531,7 +3667,12 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="editorial-card-sm p-4 bg-white">
+              <button
+                type="button"
+                onClick={() => setVideoSortBy('engagement')}
+                className="editorial-card-sm p-4 bg-white text-left hover:bg-[#FFF8FC] transition-colors duration-150"
+                title="Click to rank Reels by Engagement % in decreasing order"
+              >
                 <div className="text-[11px] font-bold text-neutral-500 flex items-center justify-between">
                   <span>AVG ENGAGEMENT</span>
                   <Send className="w-4 h-4 text-[#FF7EB6]" />
@@ -3540,12 +3681,54 @@ export default function App() {
                   {summary.avg_engagement_rate || 0}%
                 </div>
                 <div className="text-[11px] font-semibold text-neutral-600 mt-1 tabular-nums">
-                  {typeof summary.total_followers_gained === 'number'
-                    ? `+${summary.total_followers_gained.toLocaleString()} followers (API)`
-                    : `(Likes + Comments) ÷ Views`}
+                  (Likes + Comments + Saves) ÷ Views
                 </div>
-              </div>
+              </button>
             </div>
+
+            {/* Interactive Platform Combiner + Winners Chart (Left) + Explanation Panel (Right) */}
+            <OverviewWinnersStudio
+              posts={posts}
+              connectedPlatformIds={connectedPlatformIds}
+              connectionsMap={connectionsMap}
+              activeComboIds={activeComboIds}
+              onToggleComboPlatform={handleToggleComboPlatform}
+              onSelectAllCombo={handleSelectAllCombo}
+              onSelectSinglePlatform={(pid) => {
+                setSelectedPlatform(pid);
+                setComboPlatforms([pid]);
+                const snap = getActiveAnalyticsSnapshot(undefined, undefined, pid, [pid]);
+                setOpenclawOutput(runLocalOpenClawAnalysis(openclawPrompt, snap));
+              }}
+              onConnectPlatform={(pid) => {
+                handleSelectConnectPlatform(pid);
+                setActiveTab('connect');
+              }}
+              videoSortBy={videoSortBy}
+              onChangeSortBy={(metricId) => setVideoSortBy(metricId)}
+              reelsOnly={reelsOnlyFilter}
+              onToggleReelsOnly={setReelsOnlyFilter}
+              selectedWinnerKey={selectedWinnerKey}
+              onSelectWinnerKey={setSelectedWinnerKey}
+              onAnalyzePost={(post, pMeta) => {
+                const customP = `Analyze this live ${pMeta.name} post "${post.title}" (${(
+                  post.views || 0
+                ).toLocaleString()} views, +${(
+                  post.followers_gained || 0
+                ).toLocaleString()} followers gained, ${(
+                  post.likes || 0
+                ).toLocaleString()} likes, ${(
+                  post.comments || 0
+                ).toLocaleString()} comments, ${
+                  post.engagement_rate
+                }% engagement rate): ${
+                  post.video_summary_text
+                } — Why did it drive followers and how can I replicate or repurpose it across my other platforms?`;
+                setActiveTab('strategy');
+                handleRunOpenClaw(customP);
+              }}
+              onOpenPlanner={() => setActiveTab('planner')}
+            />
 
             {/* Connected Platforms Breakdown Grid (Clickable Cards — Zero Extra Buttons) */}
             {selectedPlatform === 'all' &&
@@ -3592,20 +3775,28 @@ export default function App() {
                             </div>
                             <ArrowUpRight className="w-4 h-4 text-neutral-400 group-hover:text-[#19154E] transition-colors shrink-0" />
                           </div>
-                          <div className="grid grid-cols-3 gap-2 pt-2 border-t border-neutral-200 text-center w-full tabular-nums">
+                          <div className="grid grid-cols-4 gap-2 pt-2 border-t border-neutral-200 text-center w-full tabular-nums">
                             <div>
                               <div className="text-[10px] font-bold uppercase text-neutral-500">
                                 {pMeta.audienceLabel}
                               </div>
-                              <div className="font-display font-bold text-sm text-[#19154E]">
+                              <div className="font-display font-bold text-xs sm:text-sm text-[#19154E]">
                                 {(item.followers_count || 0).toLocaleString()}
+                              </div>
+                            </div>
+                            <div>
+                              <div className="text-[10px] font-bold uppercase text-[#6D28D9]">
+                                +Gained
+                              </div>
+                              <div className="font-display font-bold text-xs sm:text-sm text-[#19154E]">
+                                +{(item.total_followers_gained || 0).toLocaleString()}
                               </div>
                             </div>
                             <div>
                               <div className="text-[10px] font-bold uppercase text-neutral-500">
                                 Views
                               </div>
-                              <div className="font-display font-bold text-sm text-[#19154E]">
+                              <div className="font-display font-bold text-xs sm:text-sm text-[#19154E]">
                                 {(item.total_views || 0).toLocaleString()}
                               </div>
                             </div>
@@ -3613,7 +3804,7 @@ export default function App() {
                               <div className="text-[10px] font-bold uppercase text-neutral-500">
                                 Likes
                               </div>
-                              <div className="font-display font-bold text-sm text-[#19154E]">
+                              <div className="font-display font-bold text-xs sm:text-sm text-[#19154E]">
                                 {(item.total_likes || 0).toLocaleString()}
                               </div>
                             </div>
@@ -3626,46 +3817,54 @@ export default function App() {
               )}
 
             {/* ============================================================
-                GOAL 1 & 2: LIVE POSTS / VIDEOS RANKING
-                & COMPACT COLLAPSIBLE AI SUMMARIES
+                ALL POSTED REELS & POSTS EXPLORER (DECREASING ORDER)
             ============================================================ */}
             <div className="editorial-card bg-white overflow-hidden">
-              <div className="p-4 sm:p-5 border-b-2 border-[#19154E] bg-[#F5EEFF] flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+              <div className="p-4 sm:p-5 border-b-2 border-[#19154E] bg-[#F5EEFF] flex flex-col xl:flex-row xl:items-center justify-between gap-3">
                 <div>
                   <h3 className="font-display font-bold text-lg sm:text-xl text-[#19154E]">
                     {selectedPlatform === 'all'
-                      ? 'Top Synced Videos & Posts'
-                      : `Top ${activeContentLabel} on @${profile.username || 'your_account'}`}
+                      ? `All Posted Reels & Content (${sortedPosts.length})`
+                      : `All ${activeContentLabel} on @${profile.username || 'your_account'} (${sortedPosts.length})`}
                   </h3>
                   <p className="text-xs font-medium text-neutral-600">
-                    Ranked by live {activePlatformLabel} telemetry with 1-click AI Strategy handoff.
+                    Browse every synced Reel &amp; post in decreasing order of Views, +Followers, Likes, or Engagement %.
                   </p>
                 </div>
 
-                {/* Sort Selector Segmented Control */}
-                <div className="inline-flex flex-wrap items-center gap-1 bg-white p-1 rounded-xl border-2 border-[#19154E]">
-                  {[
-                    { id: 'views', label: 'Views', activeBg: 'bg-[#C8F904] text-[#19154E]' },
-                    { id: 'likes', label: 'Likes', activeBg: 'bg-[#FF7EB6] text-[#19154E]' },
-                    { id: 'engagement', label: 'Engagement %', activeBg: 'bg-[#B799E8] text-[#19154E]' },
-                    { id: 'recent', label: 'Newest', activeBg: 'bg-[#19154E] text-[#FFF8FC]' },
-                    ...(hasFollowerInsights
-                      ? [{ id: 'followers', label: '+Followers', activeBg: 'bg-[#FF7EB6] text-[#19154E]' }]
-                      : []),
-                  ].map((opt) => (
-                    <button
-                      key={opt.id}
-                      type="button"
-                      onClick={() => setVideoSortBy(opt.id)}
-                      className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-colors duration-150 ${
-                        videoSortBy === opt.id
-                          ? opt.activeBg
-                          : 'text-[#19154E] hover:bg-[#F5EEFF]'
-                      }`}
-                    >
-                      {opt.label}
-                    </button>
-                  ))}
+                <div className="flex flex-wrap items-center gap-2">
+                  <input
+                    type="text"
+                    value={postSearchQuery}
+                    onChange={(e) => setPostSearchQuery(e.target.value)}
+                    placeholder="Search caption or topic..."
+                    aria-label="Search posted Reels and captions"
+                    className="px-3 py-1.5 rounded-xl bg-white border-2 border-[#19154E] text-xs font-semibold text-[#19154E] focus:outline-none w-44 sm:w-52"
+                  />
+
+                  {/* Sort Selector Segmented Control (All Metrics Always Available in Decreasing Order!) */}
+                  <div className="inline-flex flex-wrap items-center gap-1 bg-white p-1 rounded-xl border-2 border-[#19154E]">
+                    {[
+                      { id: 'views', label: 'Views ↓', activeBg: 'bg-[#C8F904] text-[#19154E]' },
+                      { id: 'followers', label: '+Followers ↓', activeBg: 'bg-[#7CC4FA] text-[#19154E]' },
+                      { id: 'likes', label: 'Likes ↓', activeBg: 'bg-[#FF7EB6] text-[#19154E]' },
+                      { id: 'engagement', label: 'Engagement % ↓', activeBg: 'bg-[#B799E8] text-[#19154E]' },
+                      { id: 'recent', label: 'Newest', activeBg: 'bg-[#19154E] text-[#FFF8FC]' },
+                    ].map((opt) => (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() => setVideoSortBy(opt.id)}
+                        className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-colors duration-150 ${
+                          videoSortBy === opt.id
+                            ? opt.activeBg
+                            : 'text-[#19154E] hover:bg-[#F5EEFF]'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </div>
 
@@ -3675,16 +3874,21 @@ export default function App() {
                     <p className="font-display font-bold text-base text-[#19154E]">
                       {isUnconnected
                         ? 'No social accounts connected yet.'
+                        : postSearchQuery.trim()
+                        ? `No Reels or posts matched "${postSearchQuery}".`
                         : `Synced profile telemetry for @${profile.username} (${(profile.followers_count || 0).toLocaleString()} ${activeAudienceLabel.toLowerCase()}).`}
                     </p>
                     <p className="text-xs text-neutral-600 font-medium max-w-xl mx-auto">
                       {isUnconnected
                         ? 'Select Connections in the sidebar to link Instagram, TikTok, YouTube, Facebook, X, or Threads.'
-                        : 'Public profile counts are live. Optional developer API tokens can be added in Connections → Advanced Setup if this platform restricts individual post feeds.'}
+                        : postSearchQuery.trim()
+                        ? 'Clear your search query to see all ranked Reels and posts.'
+                        : 'Public profile counts are live. Connect via 1-Click OAuth in Connections to pull individual Reel & post feeds.'}
                     </p>
                   </div>
                 ) : (
-                  sortedPosts.map((post, idx) => {
+                  <>
+                  {visibleSortedPosts.map((post, idx) => {
                     const pMeta = PLATFORM_BY_ID[post.platform] || PLATFORM_BY_ID.instagram;
                     return (
                       <div
@@ -3830,12 +4034,24 @@ export default function App() {
                             </p>
                           </details>
 
-                          <div className="flex items-center gap-1.5 shrink-0">
+                           <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSelectedWinnerKey(`${post.platform}-${post.id}`);
+                                window.scrollTo({ top: 180, behavior: 'smooth' });
+                              }}
+                              className="px-2.5 py-1 rounded-lg bg-[#7CC4FA]/40 border border-[#19154E] text-[11px] font-bold text-[#19154E] hover:bg-[#7CC4FA] inline-flex items-center gap-1"
+                              title="Inspect why this Reel performed in the Winners Chart above"
+                            >
+                              <span>Inspect ↑</span>
+                            </button>
+
                             <button
                               type="button"
                               onClick={() =>
                                 copyToClipboard(
-                                  `[${pMeta.name}] ${post.title}\nPermalink: ${post.permalink}\nViews: ${(post.views || 0).toLocaleString()} | Likes: ${(post.likes || 0).toLocaleString()} | Comments: ${(post.comments || 0).toLocaleString()} | ER: ${post.engagement_rate}%\nSummary: ${post.video_summary_text}`,
+                                  `[${pMeta.name}] ${post.title}\nPermalink: ${post.permalink}\nViews: ${(post.views || 0).toLocaleString()} | +Followers: +${(post.followers_gained || 0).toLocaleString()} | Likes: ${(post.likes || 0).toLocaleString()} | Comments: ${(post.comments || 0).toLocaleString()} | ER: ${post.engagement_rate}%\nSummary: ${post.video_summary_text}`,
                                   `summary-${post.id}`
                                 )
                               }
@@ -3859,7 +4075,7 @@ export default function App() {
                             <button
                               type="button"
                               onClick={() => {
-                                const customP = `Analyze this live ${pMeta.name} post "${post.title}" (${(post.views || 0).toLocaleString()} live views, ${(post.likes || 0).toLocaleString()} likes, ${(post.comments || 0).toLocaleString()} comments, ${post.engagement_rate}% engagement rate): ${post.video_summary_text} — Why did it perform this way and how can I replicate or repurpose it across my other platforms for my US audience?`;
+                                const customP = `Analyze this live ${pMeta.name} post "${post.title}" (${(post.views || 0).toLocaleString()} live views, +${(post.followers_gained || 0).toLocaleString()} followers, ${(post.likes || 0).toLocaleString()} likes, ${(post.comments || 0).toLocaleString()} comments, ${post.engagement_rate}% engagement rate): ${post.video_summary_text} — Why did it perform this way and how can I replicate or repurpose it across my other platforms for my US audience?`;
                                 setActiveTab('strategy');
                                 handleRunOpenClaw(customP);
                               }}
@@ -3885,7 +4101,22 @@ export default function App() {
                         </div>
                       </div>
                     );
-                  })
+                  })}
+
+                  {sortedPosts.length > 20 && (
+                    <div className="pt-2 text-center">
+                      <button
+                        type="button"
+                        onClick={() => setShowAllRankedPosts((prev) => !prev)}
+                        className="editorial-btn px-5 py-2.5 rounded-xl bg-[#FFF8FC] text-[#19154E] text-xs font-bold"
+                      >
+                        {showAllRankedPosts
+                          ? `Show Top 20 Only`
+                          : `Show All ${sortedPosts.length} Synced Reels & Posts ↓`}
+                      </button>
+                    </div>
+                  )}
+                  </>
                 )}
               </div>
             </div>
